@@ -111,11 +111,11 @@
 | # | 未验证项 | 为什么没验 | 怎么验 |
 |---|---|---|---|
 | 1 | **真实 `SendInput` 注入与 UIPI 拒绝路径** | 自动化测试会污染开发桌面（真的会移动鼠标/按键）；`--no-inject` 模式下只验证了"不调用 SendInput" | 被控端开一个高完整性（管理员）窗口，控制端点它；确认能点动。再用非提升令牌启动代理，确认返回"被控端需要重新登录以恢复控制"而不是静默失败 |
-| 2 | **硬件 MFT 选择路径** | 本机只枚举到软件 MFT，回落路径已验证，硬件分支未走到 | 在有 Intel/NVIDIA/AMD 硬件编码器的机器上跑 `--list-encoders`，确认 `BackendName` 前缀为 `hardware:` |
+| 2 | **硬件 MFT 选择路径** | 本机只枚举到软件 MFT，回落路径已验证，硬件分支未走到 | 在有 Intel/NVIDIA/AMD 硬件编码器的机器上用测试图源起代理，确认日志 `BackendName` 前缀为 `hardware:`；再用 `--no-hardware-encoder` 对照确认变 software（步骤见 tests/MANUAL-VERIFICATION.md A3） |
 | 3 | **GPU VideoProcessor 转换（BGRA→NV12）** | 走的是 CPU 路径并已验证；GPU 路径未执行 | 在支持 D3D11 VideoProcessor 的机器上强制启用 GPU 路径，比对输出 NV12 与 CPU 路径的一致性 |
 | 4 | **`DXGI_ERROR_ACCESS_LOST` 真实触发** | 需要真的切换分辨率/旋转屏幕/重启显卡驱动；只单测了恢复逻辑 | 会话中改变被控端分辨率或旋转屏幕，确认状态条出现"正在恢复画面"且 1–3 秒内自动恢复、控制权不丢 |
 | 5 | **锁屏 / 解锁切换** | 未在会话中真的锁屏 | 会话中锁屏被控端，确认显示"等待本地登录"；解锁后自动恢复画面 |
-| 6 | **代理与运行中的 Service 的管道对接** | 测试时 Service 未常驻运行 | 起真实 Service（`--console --inject-agent --no-inject`），确认代理能连上 `DeskLink.Agent.{instance}` 并完成 `ping` |
+| 6 | **代理与运行中的 Service 的管道对接** | 测试时 Service 未常驻运行 | 起真实 Service（`--console --inject-agent`；`--no-inject` 是 AgentLauncher 传给代理的内部参数，不是 Service 启动参数），确认代理能连上 `DeskLink.Agent.{instance}` 并完成 `ping`（步骤见 tests/MANUAL-VERIFICATION.md A2） |
 
 ### P7 的互操作坑（已踩，写下来避免重踩）
 
