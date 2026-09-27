@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>DeskLink.Client</RootNamespace>
+    <AssemblyName>DeskLink.Client</AssemblyName>
+    <OutputType>WinExe</OutputType>
+    <!-- Raw Input 与 Media Foundation 互操作需要直接读写指针/结构体 -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- 本程序只在 Windows 桌面会话内运行；WPF/MF/RawInput 全是 Windows 专有 API，
+         标成 windows 平台后不必在每个调用点堆 CA1416 抑制。 -->
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\Protocol\DeskLink.Protocol\DeskLink.Protocol.csproj" />
+  </ItemGroup>
+
+  <!--
+    P8 只引用 Protocol（契约/DTO/媒体帧编解码），**绝不**引用 DeskLink.Service：
+      - 客户端与 Service 之间只有命名管道，编译期不需要 Service 的程序集；
+      - 引用 Service 会把 Windows 服务宿主、DPAPI、注册表等 UI 无关依赖一起拖进来，
+        也让 DTO 有被复制一份从而漂移的风险（见 PipeContract.cs 顶部说明）。
+    H.264 软解需要 Media Foundation 互操作，用与 Agent 相同的 Vortice 包（3.2.0）。
+  -->
+  <ItemGroup>
+    <PackageReference Include="Vortice.MediaFoundation" Version="3.2.0" />
+  </ItemGroup>
+
+</Project>

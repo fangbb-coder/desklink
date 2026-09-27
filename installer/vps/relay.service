@@ -1,0 +1,42 @@
+# relayd systemd 单元（由 deploy.sh 用 sed 替换 @...@ 占位符后安装）。
+#
+# 中继只转发**密文**：它能看到连接时间/在线状态/流量大小，但无法解密业务帧。
+# 它需要向 registryd 查配对与撤销状态，并订阅 regnotify.sock 以便撤销即时踢线。
+[Unit]
+Description=DeskLink relayd（QUIC + TCP/TLS 双监听中继）
+Documentation=https://github.com/desklink
+After=network.target desklink-registryd.service
+Wants=desklink-registryd.service
+
+[Service]
+Type=simple
+User=desklink
+Group=desklink
+WorkingDirectory=@DATA_DIR@
+ExecStart=@INSTALL_DIR@/relayd \
+    --listen :@RELAY_PORT@ \
+    --registry http://127.0.0.1:@REG_PORT@ \
+    --token-file @CONF_DIR@/registry.token \
+    --cert @CONF_DIR@/certs/relay.crt \
+    --key @CONF_DIR@/certs/relay.key \
+    --socket @DATA_DIR@/regnotify.sock
+
+Restart=on-failure
+RestartSec=3
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# 只需要读证书与 token；写路径仅数据目录（socket 由 registryd 创建，relayd 只读订阅）。
+ReadWritePaths=@DATA_DIR@
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+# UDP 是 QUIC 必需；显式放开 AF_INET/AF_INET6（部分发行版的默认沙箱会限制）。
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

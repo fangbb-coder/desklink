@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  进程 DPI 感知声明。
+
+  为什么必须有（本机实测踩到）：不声明时进程默认是 DPI-unaware，
+  DXGI 枚举输出给出的 DesktopCoordinates 会被系统按缩放比例"虚拟化"：
+  同一块 2240x1400 的屏幕，在 DPI-unaware 进程里 ListMonitors 报 1493x933
+  （150% 缩放下 2240/1.5≈1493），而 Desktop Duplication 抓到的纹理
+  始终是物理像素 2240x1400。结果是"上报的显示器尺寸"和"实际抓到的帧尺寸"
+  对不上——对需要把远端坐标映射回本机坐标的输入注入来说是致命的不一致。
+
+  声明 PerMonitorV2 之后，枚举与捕获统一在物理像素空间，坐标映射才自洽。
+-->
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <assemblyIdentity version="1.0.0.0" name="DeskLink.DesktopAgent.app" />
+
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+    </windowsSettings>
+  </application>
+</assembly>

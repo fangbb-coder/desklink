@@ -1,0 +1,8 @@
+<Application x:Class="DeskLink.Client.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- 不设 StartupUri：主窗口由 OnStartup 手工创建，以便把命令行解析出的
+         管道名等参数注入 MainViewModel。 -->
+    <Application.Resources>
+    </Application.Resources>
+</Application>

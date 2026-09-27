@@ -1,0 +1,16 @@
+<Window x:Class="DeskLink.Client.Views.DirectConnectDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="局域网直连" SizeToContent="WidthAndHeight"
+        WindowStartupLocation="CenterOwner" ResizeMode="NoResize">
+    <StackPanel Margin="16" Width="380">
+        <TextBlock Text="输入被控端的 IP:端口（同子网内，例如 192.168.1.20:47200）"
+                   TextWrapping="Wrap" Margin="0,0,0,8" />
+        <TextBox x:Name="EndpointText" FontFamily="Consolas" Margin="0,0,0,4" />
+        <TextBlock x:Name="ErrorText" Foreground="OrangeRed" TextWrapping="Wrap" Margin="0,0,0,8" />
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Content="取消" Width="80" Margin="0,0,8,0" IsCancel="True" Click="OnCancel" />
+            <Button Content="连接" Width="90" IsDefault="True" Click="OnConnect" />
+        </StackPanel>
+    </StackPanel>
+</Window>

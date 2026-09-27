@@ -1,0 +1,37 @@
+# registryd systemd 单元（由 deploy.sh 用 sed 替换 @...@ 占位符后安装）。
+#
+# 安全要点：registry 保存设备公钥 / 加密昵称 / 配对关系 / 撤销状态，
+# **绝不暴露公网** —— 只监听 127.0.0.1，由 relayd 经 loopback HTTP 代理访问。
+[Unit]
+Description=DeskLink registryd（设备/配对/撤销状态，仅 loopback）
+Documentation=https://github.com/desklink
+After=network.target
+
+[Service]
+Type=simple
+User=desklink
+Group=desklink
+WorkingDirectory=@DATA_DIR@
+ExecStart=@INSTALL_DIR@/registryd \
+    --data-dir @DATA_DIR@/registryd \
+    --listen 127.0.0.1:@REG_PORT@ \
+    --socket @DATA_DIR@/regnotify.sock \
+    --token-file @CONF_DIR@/registry.token
+
+# 崩溃自动重启；registry 重启不影响已建立的会话（relay 只是查不到状态会拒绝新接线）。
+Restart=on-failure
+RestartSec=3
+
+# 收紧权限：只需要写自己的数据目录与 unix socket。
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=@DATA_DIR@
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>DeskLink.Service</RootNamespace>
+    <AssemblyName>DeskLink.Service</AssemblyName>
+    <!-- 必须显式声明 Exe：Microsoft.NET.Sdk 默认 OutputType=Library，
+         那样不会生成 runtimeconfig.json / 可执行入口，Program.Main 无法被启动
+         （console 双实例、Windows 服务注册、P10 installer 部署都依赖它）。
+         用 Exe（控制台子系统）而非 WinExe：console 模式需要 stdout 日志，
+         SCM 托管时也无影响。 -->
+    <OutputType>Exe</OutputType>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- 同一构建输出同时承担 Windows 服务宿主（LocalSystem）和 console 模式（开发自控自）。
+         UseWindowsService 在 Windows 服务模式下注册为 SCM 服务，在 console 模式下为 no-op。 -->
+    <RuntimeIdentifiers>win-x64;win-x86;win-arm64</RuntimeIdentifiers>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\Protocol\DeskLink.Protocol\DeskLink.Protocol.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 主机/服务/DI/配置 -->
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="9.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="9.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="9.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="9.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="9.0.0" />
+    <!-- QUIC 优先 + TCP/TLS 兜底：System.Net.Quic 在 .NET 7+ 是 BCL 内置（Microsoft.NETCore.App 共享框架），无需 NuGet 引用 -->
+    <!-- 注册表读安装状态/端口启用等 -->
+    <PackageReference Include="Microsoft.Win32.Registry" Version="5.0.0" />
+    <!-- DPAPI（ProtectedData.Protect/Unprotect）：.NET 9 起不再随 BCL 内置，需显式引用 -->
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />
+    <!-- 文件/目录 ACL（FileSystemAclExtensions / DirectorySecurity / FileSystemSecurity）：
+         net9.0 共享框架已内置（System.IO.FileSystem.AccessControl + System.Security.AccessControl
+         都在 Microsoft.NETCore.App ref pack 中），因此不需要 NuGet 包。 -->
+  </ItemGroup>
+
+</Project>

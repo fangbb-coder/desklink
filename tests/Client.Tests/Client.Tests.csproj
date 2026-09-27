@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- net9.0-windows + UseWPF：本测试要直接构造 WPF 窗口做冒烟（STA），
+         因此必须能加载 PresentationFramework，和被测项目一致。 -->
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <RootNamespace>DeskLink.Client.Tests</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <!-- 个别用例（WPF STA 构造）在无桌面测试宿主上无法运行，需要运行时 Skip.IfNot -->
+    <PackageReference Include="Xunit.SkippableFact" Version="1.5.23" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Client\DeskLink.Client\DeskLink.Client.csproj" />
+    <ProjectReference Include="..\..\src\Protocol\DeskLink.Protocol\DeskLink.Protocol.csproj" />
+  </ItemGroup>
+
+</Project>

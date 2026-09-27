@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- 目标框架改为 net9.0-windows：本程序只在 Windows 会话内运行，
+         且 P7 大量使用 Windows 专有的 COM 互操作（DXGI / Media Foundation /
+         Marshal.GetObjectForIUnknown），标成 windows 平台可以避免 CA1416 噪声。 -->
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>DeskLink.DesktopAgent</RootNamespace>
+    <AssemblyName>DeskLink.DesktopAgent</AssemblyName>
+    <OutputType>Exe</OutputType>
+    <UseWindowsForms>false</UseWindowsForms>
+    <!-- DXGI 抓帧需要直接读 MappedSubresource 指针，走 unsafe 拷贝比 Marshal.Copy 更快也更直观 -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+    <!-- 声明 PerMonitorV2 DPI 感知，让显示器枚举与 DXGI 抓帧统一在物理像素空间。
+         详见 app.manifest 里的说明（不声明会导致上报尺寸与实际帧尺寸不一致）。 -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\Protocol\DeskLink.Protocol\DeskLink.Protocol.csproj" />
+  </ItemGroup>
+
+  <!--
+    P7 依赖（Vortice.Windows 拆成若干独立包）。
+    注：NuGet 上正确的包 ID 是 Vortice.{DXGI,Direct3D11,MediaFoundation,DirectX}
+    （不带 .Windows. 前缀），版本 3.2.0。
+    这里显式引用 Vortice.DirectX 是因为 DriverType / FeatureLevel 定义在
+    Vortice.DirectX.dll（命名空间 Vortice.Direct3D）里，虽然它经
+    Vortice.MediaFoundation 传递可达，但显式引用可以避免依赖解析变化后编译失败。
+  -->
+  <ItemGroup>
+    <PackageReference Include="Vortice.DXGI" Version="3.2.0" />
+    <PackageReference Include="Vortice.Direct3D11" Version="3.2.0" />
+    <PackageReference Include="Vortice.MediaFoundation" Version="3.2.0" />
+    <PackageReference Include="Vortice.DirectX" Version="3.2.0" />
+  </ItemGroup>
+
+</Project>
