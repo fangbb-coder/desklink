@@ -62,12 +62,36 @@ pwsh -NoProfile -File tests/e2e-smoke.ps1 -Mode all -Transport both
 ```
 
 当前测试规模（`dotnet test DeskLink.sln`，全部真实断言、无 `Assert.True(true)` 占位）：
-Protocol 71 / Service 176 / Client 120 / DirectHandshake 41 / Agent 137 = **545 通过**。
+Protocol 71 / Service 176 / Client 120 / DirectHandshake 41 / Agent 137 / Panel 78 = **623 通过**。
 
 > 2026-09-29 修复轮新增 46 个用例（见 [KnownIssues.md](./KnownIssues.md) 1.7 节：
 > 直连 UI 假接线 / 无条件"已连接" / 中继地址"已保存"但不生效）。
+>
+> 同日新增 `DeskLink.Panel`（本机服务图形控制面板）与 78 个配套用例。
 
-### 直连与真机验收
+### 图形化：DeskLink 控制面板
+
+命令行只适合排障。日常使用请走 **`DeskLink.Panel.exe`**（控制端与被控端通用）：
+
+| 面板做什么 | 等价的命令行 |
+|---|---|
+| 读本机公钥并复制 | `DeskLink.Service.exe --data-dir <dir> --print-config` |
+| 与对方配对 | `DeskLink.Service.exe --data-dir <dir> --pair-peer-pub <对方公钥>` |
+| 放行/关闭入站端口（自动弹 UAC 提权） | `DeskLink.Service.exe --firewall-set 47200 on\|off` |
+| 启停本机服务 | `DeskLink.Service.exe --console --data-dir <dir> --enable-direct --inject-agent` |
+| 查看会话数 / 中继 / 端到端状态 | `get_status` RPC |
+
+**被控端**：打开面板 → 点「我是被控端」→ 把面板给出的**公钥**和**本机地址**发给控制端。
+**控制端**：打开面板 → 点「我是控制端」→ 粘贴对方公钥 → 点「打开控制界面」，
+在设备页选「局域网直连」并填被控端 `IP:端口`。
+
+面板与 WPF 客户端职责不重叠：**面板管本机服务，客户端管远程操控**。
+
+⚠ 面板显示的防火墙状态是**唯一权威**的"能不能被连上"判据。不要把
+`get_status` 的 `direct_enabled` 当成"直连已开启"——它取自防火墙探测而非监听状态，
+语义警告写在 `PipeContract.StatusResult.DirectEnabled` 的注释里。
+
+### 直连与真机验收（命令行排障路径）
 
 ```powershell
 # 单机双实例直连演练（不需要第二台机器；不启动桌面代理，不会移动鼠标）

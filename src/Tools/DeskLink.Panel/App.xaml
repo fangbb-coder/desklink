@@ -1,0 +1,22 @@
+<Application x:Class="DeskLink.Panel.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             StartupUri="MainWindow.xaml">
+  <Application.Resources>
+    <SolidColorBrush x:Key="CardBrush" Color="#FFFFFF" />
+    <SolidColorBrush x:Key="LineBrush" Color="#DDE1E6" />
+    <SolidColorBrush x:Key="MutedBrush" Color="#6B7280" />
+    <SolidColorBrush x:Key="AccentBrush" Color="#2563EB" />
+
+    <!-- 状态横幅的四种配色。定义在控件自身 Resources 之外的 Application 级会被测试宿主拿不到，
+         因此 MainWindow 里另有一份本地副本作为兜底。 -->
+    <SolidColorBrush x:Key="InfoBgBrush" Color="#EFF6FF" />
+    <SolidColorBrush x:Key="OkBgBrush" Color="#ECFDF5" />
+    <SolidColorBrush x:Key="WarnBgBrush" Color="#FFFBEB" />
+    <SolidColorBrush x:Key="ErrorBgBrush" Color="#FEF2F2" />
+    <SolidColorBrush x:Key="InfoFgBrush" Color="#1D4ED8" />
+    <SolidColorBrush x:Key="OkFgBrush" Color="#047857" />
+    <SolidColorBrush x:Key="WarnFgBrush" Color="#B45309" />
+    <SolidColorBrush x:Key="ErrorFgBrush" Color="#B91C1C" />
+  </Application.Resources>
+</Application>

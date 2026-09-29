@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>DeskLink.Panel</RootNamespace>
+    <AssemblyName>DeskLink.Panel</AssemblyName>
+    <OutputType>WinExe</OutputType>
+    <!-- 本程序只在 Windows 桌面会话内运行；WPF / NamedPipe / 进程提权全是 Windows 专有 API -->
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+
+  <!--
+    P8 同款纪律：**只引用 Protocol**，绝不引用 DeskLink.Service。
+      - 面板与 Service 之间只有「子进程 + 命名管道」两种进程外契约，编译期不需要 Service 程序集；
+      - 引用 Service 会把 Windows 服务宿主、DPAPI、注册表依赖一起拖进一个 UI 程序；
+      - 也能避免 DTO 被复制一份从而与真实实现漂移（见 PipeContract.cs 顶部说明）。
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\Protocol\DeskLink.Protocol\DeskLink.Protocol.csproj" />
+  </ItemGroup>
+
+</Project>

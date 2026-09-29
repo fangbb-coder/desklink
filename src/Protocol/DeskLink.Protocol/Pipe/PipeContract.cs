@@ -103,12 +103,23 @@ public sealed class StatusResult
     [JsonPropertyName("relay_state")]
     public string RelayState { get; set; } = "disconnected";
 
+    /// <summary>
+    /// **语义警告（2026-09-29 补）**：这个名字极具误导性——它**不是**"DirectServer 正在监听"。
+    /// 它取自 <c>FirewallHelper.QueryEnabled(port)</c>，含义是"该端口的防火墙/注册表放行状态"。
+    ///
+    /// 实测：带 <c>--enable-direct</c> 启动、日志明确打出
+    /// <c>DirectServer enabled on port 47211</c>，本字段仍可能是 <c>false</c>（因为防火墙没放行）。
+    /// 消费方（UI）**不要**把它渲染成"直连已开启/已关闭"——那会在 DirectServer 明明在监听时
+    /// 显示"已关闭"，正是本项目刚修掉的那类"UI 撒谎"缺陷。
+    ///
+    /// 判断"直连是否真在监听"请看 Service 日志的 <c>DirectServer enabled on port N</c>，
+    /// 或看直连会话数 <see cref="DirectActiveSessions"/>。
+    /// </summary>
     [JsonPropertyName("direct_enabled")]
     public bool DirectEnabled { get; set; }
 
     [JsonPropertyName("pairing_count")]
     public int PairingCount { get; set; }
-
     [JsonPropertyName("instance_id")]
     public string InstanceId { get; set; } = "";
 
