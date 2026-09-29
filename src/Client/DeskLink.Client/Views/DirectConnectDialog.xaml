@@ -10,7 +10,9 @@
         <TextBlock x:Name="ErrorText" Foreground="OrangeRed" TextWrapping="Wrap" Margin="0,0,0,8" />
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
             <Button Content="取消" Width="80" Margin="0,0,8,0" IsCancel="True" Click="OnCancel" />
-            <Button Content="连接" Width="90" IsDefault="True" Click="OnConnect" />
+            <Button Content="填入" Width="90" IsDefault="True" Click="OnConnect" />
         </StackPanel>
+        <TextBlock Text="本对话框只负责校验并填入地址；真正发起连接由设备页的“连接”按钮完成。"
+                   Foreground="Gray" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0" />
     </StackPanel>
 </Window>

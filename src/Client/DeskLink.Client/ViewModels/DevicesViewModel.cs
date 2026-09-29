@@ -20,6 +20,9 @@ public enum ConnectOutcome
     FingerprintNotConfirmed,
     InvalidLanEndpoint,
     LanNotEnabled,
+
+    /// <summary>拨号请求已发出但失败（网络不通 / 未配对 / 握手失败），UI 停留在设备页。</summary>
+    DialFailed,
 }
 
 /// <summary>设备列表项。</summary>
@@ -307,7 +310,7 @@ public sealed class DevicesViewModel : ObservableObject
 
         if (PathMode == ConnectPathMode.Lan)
         {
-            return ConnectLan(device);
+            return await ConnectLanAsync(device, ct);
         }
 
         return await ConnectRelayAsync(device, ct);
@@ -335,11 +338,18 @@ public sealed class DevicesViewModel : ObservableObject
         return ConnectOutcome.Approved;
     }
 
-    private ConnectOutcome ConnectLan(DeviceItem device)
+    /// <summary>
+    /// 局域网直连：**先真的拨出去，拨通才通知 UI 跳远程页**。
+    ///
+    /// 这一步以前根本不存在——旧实现校验完 IP:端口就直接
+    /// <see cref="LanConnectApproved"/>，而没有任何 RPC 告诉 Service 去拨号，
+    /// 于是 UI 显示"已连接"、画面永远黑屏。现在拨号失败会明确报错并留在设备页。
+    /// </summary>
+    private async Task<ConnectOutcome> ConnectLanAsync(DeviceItem device, CancellationToken ct)
     {
         if (!DirectEnabled)
         {
-            StatusMessage = "被控端未启用局域网直连";
+            StatusMessage = "本机未启用局域网直连（被控端需 --enable-direct 或在 Settings 放行端口）";
             return ConnectOutcome.LanNotEnabled;
         }
 
@@ -350,9 +360,38 @@ public sealed class DevicesViewModel : ObservableObject
         }
 
         // 局域网直连不弹指纹确认：配对已是公钥信任的根来源（DESIGN「设备身份和权限」）。
+        Busy = true;
         StatusMessage = $"正在直连 {endpoint}…";
-        LanConnectApproved?.Invoke(device, endpoint);
-        return ConnectOutcome.Approved;
+        try
+        {
+            var result = await _api
+                .DialDirectAsync(device.PeerPubB64, endpoint.Host, endpoint.Port, ct)
+                .ConfigureAwait(false);
+
+            if (!result.Ok)
+            {
+                StatusMessage = $"直连失败：{result.Detail ?? "未知原因"}";
+                return ConnectOutcome.DialFailed;
+            }
+
+            StatusMessage = $"已直连 {endpoint}（传输：{result.Transport ?? "?"}）";
+            LanConnectApproved?.Invoke(device, endpoint);
+            return ConnectOutcome.Approved;
+        }
+        catch (PipeUnavailableException)
+        {
+            StatusMessage = "Service 未运行：无法发起直连";
+            return ConnectOutcome.DialFailed;
+        }
+        catch (PipeRpcException ex)
+        {
+            StatusMessage = $"直连失败：{ex.Message}";
+            return ConnectOutcome.DialFailed;
+        }
+        finally
+        {
+            Busy = false;
+        }
     }
 
     private static string ShortPub(string pub)

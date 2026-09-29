@@ -41,6 +41,7 @@ public sealed class ServiceHost : IHostedService
     private readonly RelayClient? _relay;
     private readonly RelaySessionRunner? _runner;
     private readonly DirectServer? _direct;
+    private readonly DirectDialer? _dialer;
     private readonly MediaPipeServer? _media;
 
     public ServiceHost(
@@ -54,6 +55,7 @@ public sealed class ServiceHost : IHostedService
         RelayClient? relay,
         RelaySessionRunner? runner,
         DirectServer? direct,
+        DirectDialer? dialer,
         MediaPipeServer? media)
     {
         _options = options;
@@ -66,6 +68,7 @@ public sealed class ServiceHost : IHostedService
         _relay = relay;
         _runner = runner;
         _direct = direct;
+        _dialer = dialer;
         _media = media;
     }
 
@@ -101,29 +104,43 @@ public sealed class ServiceHost : IHostedService
             _logger.LogInformation("RelayClient disabled (no relayUrl configured)");
         }
 
-        // 4) 启动局域网直连监听（被控端角色，P5.5）
+        // 4) 局域网直连监听（被控端角色，P5.5）
         //
         // 启用条件：显式 --enable-direct，或用户在 Settings/安装时已放行端口
         // （注册表 DirectEnabled=1，与防火墙规则同源）。
+        //
+        // 注意：**出站**拨号（控制端角色）不受这个开关约束——控制端机台上
+        // 往往没有入站防火墙规则，但它必须能主动连出去，见下方 DirectDialer。
         var directEnabled = _options.EnableDirect || _firewall.QueryEnabled(_options.DirectPort);
-        if (_direct != null && directEnabled)
+
+        // 出站与入站直连会话共用同一套业务处理器装配（控制流探针 + 文件传输引擎）。
+        // 抽成局部函数是为了保证两条路径**不会行为漂移**。
+        void WireDirectSession(DirectSession session)
         {
             // 为每个直连会话注册控制流探针（与中继路径共用同一实现）。
-            _direct.OnSessionEstablished = session =>
-            {
-                var probe = new SessionControlProbe(
-                    msg => _logger.LogInformation("[direct] {Msg}", msg));
-                probe.Attach(session.Pump);
-                _ = probe.SendProbeAsync();
+            var probe = new SessionControlProbe(
+                msg => _logger.LogInformation("[direct] {Msg}", msg));
+            probe.Attach(session.Pump);
+            _ = probe.SendProbeAsync();
 
-                // 文件传输引擎（P6）：与中继路径共用同一实现；scope 为空则一律拒绝。
-                var fileEngine = new FileTransferEngine(
-                    new FileTransferScope(_options.FileScopeRoots),
-                    log: msg => _logger.LogInformation("[direct/file] {Msg}", msg));
-                fileEngine.Attach(new SessionPumpFileSink(session.Pump));
-                session.Pump.Register(ProtocolConstants.LogicalStream.File, fileEngine.OnFrame);
-                session.FileEngine = fileEngine;
-            };
+            // 文件传输引擎（P6）：与中继路径共用同一实现；scope 为空则一律拒绝。
+            var fileEngine = new FileTransferEngine(
+                new FileTransferScope(_options.FileScopeRoots),
+                log: msg => _logger.LogInformation("[direct/file] {Msg}", msg));
+            fileEngine.Attach(new SessionPumpFileSink(session.Pump));
+            session.Pump.Register(ProtocolConstants.LogicalStream.File, fileEngine.OnFrame);
+            session.FileEngine = fileEngine;
+        }
+
+        if (_dialer != null)
+        {
+            _dialer.OnSessionEstablished = WireDirectSession;
+            _logger.LogInformation("DirectDialer ready (outbound LAN dialing enabled)");
+        }
+
+        if (_direct != null && directEnabled)
+        {
+            _direct.OnSessionEstablished = WireDirectSession;
             try
             {
                 await _direct.StartAsync(cancellationToken);
@@ -165,6 +182,11 @@ public sealed class ServiceHost : IHostedService
         if (_media != null)
         {
             await _media.DisposeAsync();
+        }
+
+        if (_dialer != null)
+        {
+            await _dialer.DisposeAsync();
         }
 
         if (_direct != null)

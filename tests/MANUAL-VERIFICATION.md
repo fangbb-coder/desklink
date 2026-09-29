@@ -83,15 +83,47 @@ $agent = 'src\Agent\DeskLink.DesktopAgent\bin\Debug\net9.0-windows\DeskLink.Desk
 
 ## B. 双机局域网（同子网两台真实机器）
 
-> 通用前置：被控端管理员终端跑
-> `DeskLink.Service.exe --console --enable-direct --inject-agent --file-scope <共享目录>`；
-> 防火墙放行 47200（`--firewall-set 47200 on`）。以下"客户端"均指控制端。
+> **先做这一步的零门槛前置**：在**任意一台**机器上跑
+> `pwsh -NoProfile -File tests\manual-lan-demo.ps1`（不需要第二台机器）。
+> 它会真起两个 Service 实例、双向配对、走 `direct_dial` 建立真实加密会话，
+> 并断言两端都看到活跃会话。它能提前排掉"代码根本没连上"这一类问题，
+> 让你在双机排查时不必怀疑协议层。
+
+> 通用前置：
+>
+> 1. **双向配对**（直连没有 registry 代劳，缺一边就会在 SIGMA 前被对端断开）：
+>    - 被控端管理员终端执行 `DeskLink.Service.exe --console --data-dir <A> --print-config`，
+>      记下 `ed25519_pub_b64`；
+>    - 控制端执行 `--console --data-dir <B> --print-config`，记下自己的公钥；
+>    - 控制端：`--data-dir <B> --pair-peer-pub <被控端公钥>`
+>    - 被控端：`--data-dir <A> --pair-peer-pub <控制端公钥>`
+> 2. 被控端起服务（管理员）：
+>    `DeskLink.Service.exe --console --data-dir <A> --enable-direct --inject-agent --file-scope D:\DeskLinkShare`
+> 3. 被控端放行入站端口（管理员）：
+>    `DeskLink.Service.exe --firewall-set 47200 on`
+> 4. 控制端起服务：
+>    `DeskLink.Service.exe --console --data-dir <B>`
+> 5. 两端各跑一次自检，确认没有红色项：
+>    - 被控端：`pwsh -NoProfile -File tests\verify-lan.ps1 -Mode preflight -Instance <A的实例名> -ExpectRole controlled`
+>    - 控制端：`pwsh -NoProfile -File tests\verify-lan.ps1 -Mode preflight -Instance <B的实例名>`
+>    （实例名 = `--data-dir` 的末段；RPC 管道是 `DeskLink.Client.{实例名}`）
+
+### B0. 拨号链路（可先在命令行验证，不必开 UI）
+
+- [ ] 控制端：`pwsh -NoProfile -File tests\verify-lan.ps1 -Mode dial -Instance <B> -PeerPub <被控端公钥> -Target <被控端IP>:47200`
+- [ ] 验收：退出码 0，输出含"拨号成功"，且随后 `direct_active_sessions = 1`
+- [ ] **失败时**看输出里的逐项对照（配对 / 防火墙 / SIGMA 三类原因）；
+      也可以开 `-Mode watch` 在另一个窗口观察会话数变化
+- [ ] 可选：现在打开客户端设备页，选"局域网直连"、填同一个 `IP:端口`、点"连接"，
+      应进入远程页（**不会再出现"已连接但黑屏"**——会话不存在时 UI 会如实报错并留在设备页）
 
 ### B1. 真实桌面画面端到端 `K#3.1 K#6.媒体1`
 
-- [ ] 客户端设备页选中在线设备 → 中继/直连进入远程页
+- [ ] 前置：B0 通过。被控端桌面已解锁（有真实内容可看）
+- [ ] 客户端设备页选中该设备 → 局域网直连 → 填 `IP:端口` → 点"连接"
 - [ ] 验收：被控端真实桌面画面出现，鼠标移动时画面实时跟随
-- [ ] **失败时**：黑屏/卡首帧 → 先看被控端代理日志（DXGI/MFT），再看 Service 转发泵日志
+- [ ] **失败时**：画面黑但状态显示已连接 → 查被控端代理日志（DXGI/MFT）与 Service 转发泵日志；
+      状态直接报错"未能建立远程会话" → 回 B0 查链路
 
 ### B2. 输入端到端（须先切全屏） `K#6.媒体2`
 

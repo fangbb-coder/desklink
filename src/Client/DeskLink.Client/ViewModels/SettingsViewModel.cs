@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using DeskLink.Client.Services;
+using DeskLink.Protocol.Pipe;
 
 namespace DeskLink.Client.ViewModels;
 
@@ -33,6 +34,8 @@ public sealed class SettingsViewModel : ObservableObject
     private string _relayCertificateFingerprint = "";
     private bool _relayCertificateConfirmed;
     private bool _busy;
+    private bool _pendingRestart;
+    private string _activeRelayUrl = "";
 
     public SettingsViewModel(IServiceApi api)
     {
@@ -63,6 +66,7 @@ public sealed class SettingsViewModel : ObservableObject
             {
                 OnPropertyChanged(nameof(RelayUrlValidation));
                 OnPropertyChanged(nameof(IsRelayUrlValid));
+                OnPropertyChanged(nameof(HasPendingRelayChange));
             }
         }
     }
@@ -71,6 +75,36 @@ public sealed class SettingsViewModel : ObservableObject
     public RelayUrlValidation RelayUrlValidation => ValidateRelayUrl(_relayUrl);
 
     public bool IsRelayUrlValid => RelayUrlValidation.IsValid;
+
+    /// <summary>
+    /// 进程**真正在用**的中继地址（Service 启动时快照）。
+    ///
+    /// 当它与 <see cref="RelayUrl"/> 不一致时，说明用户改了配置但还没重启服务——
+    /// UI 必须把这件事显示出来，否则用户以为已经在连新中继。
+    /// </summary>
+    public string ActiveRelayUrl
+    {
+        get => _activeRelayUrl;
+        private set
+        {
+            if (SetProperty(ref _activeRelayUrl, value))
+            {
+                OnPropertyChanged(nameof(HasPendingRelayChange));
+            }
+        }
+    }
+
+    /// <summary>已保存但尚未生效（需重启服务）。</summary>
+    public bool PendingRestart
+    {
+        get => _pendingRestart;
+        private set => SetProperty(ref _pendingRestart, value);
+    }
+
+    /// <summary>输入框里的地址与实际在用地址不一致（配置已存、连接未换）。</summary>
+    public bool HasPendingRelayChange =>
+        !string.IsNullOrWhiteSpace(ActiveRelayUrl)
+        && !string.Equals(ActiveRelayUrl.Trim(), (RelayUrl ?? "").Trim(), StringComparison.OrdinalIgnoreCase);
 
     public int DirectPort
     {
@@ -161,6 +195,7 @@ public sealed class SettingsViewModel : ObservableObject
         {
             var cfg = await _api.GetConfigAsync(ct);
             RelayUrl = cfg.RelayUrl ?? "";
+            ActiveRelayUrl = cfg.ActiveRelayUrl ?? "";
             DirectPort = cfg.DirectPort;
             DirectEnabled = cfg.DirectEnabled;
 
@@ -170,7 +205,10 @@ public sealed class SettingsViewModel : ObservableObject
 
             var status = await _api.GetStatusAsync(ct);
             AgentRunning = status.E2EState is "handshaking" or "sigma" or "established";
-            StatusMessage = "已加载配置";
+            PendingRestart = HasPendingRelayChange;
+            StatusMessage = PendingRestart
+                ? $"已加载配置。注意：当前进程仍在使用 {ActiveRelayUrl}，输入框里的地址需重启服务后才生效。"
+                : "已加载配置";
         }
         catch (PipeUnavailableException)
         {
@@ -205,7 +243,12 @@ public sealed class SettingsViewModel : ObservableObject
         try
         {
             var result = await _api.SetConfigAsync(RelayUrl.Trim(), DirectPort, ct);
-            StatusMessage = result.FirewallRepaired ? "已保存；防火墙规则已同步" : "已保存";
+
+            // 诚实性（缺陷③）：中继地址改了并不会重建正在跑的 RelayClient——
+            // 它在 Service 启动时就按当时的 options.RelayUrl 构造好了。
+            // 旧实现这里无条件弹"已保存"，用户会以为已经在连新中继了。
+            StatusMessage = BuildSaveMessage(result);
+            PendingRestart = result.RequiresRestart;
             return result.Ok;
         }
         catch (PipeUnavailableException)
@@ -222,6 +265,23 @@ public sealed class SettingsViewModel : ObservableObject
         {
             Busy = false;
         }
+    }
+
+    /// <summary>
+    /// 组装保存后的提示文案：把"立即生效"与"需重启才生效"分开讲。
+    /// 服务端也带了一份 <c>RestartHint</c>，优先用服务端的（本机化更准）。
+    /// </summary>
+    private static string BuildSaveMessage(SetConfigResult result)
+    {
+        if (!result.RequiresRestart)
+        {
+            return result.FirewallRepaired ? "已保存；防火墙规则已同步" : "已保存";
+        }
+
+        var hint = result.RestartHint ?? "中继地址已保存，但需重启 DeskLinkService 后才会生效。";
+        return result.FirewallRepaired
+            ? $"{hint}（防火墙规则已立即同步）"
+            : hint;
     }
 
     /// <summary>

@@ -31,6 +31,18 @@ internal sealed class FakeServiceApi : IServiceApi
     public FileListResultDto ListResult { get; set; } = new() { Ok = true };
     public FileTransferResultDto TransferResult { get; set; } = new() { Ok = true, Bytes = 7, Target = "x" };
 
+    /// <summary>可编程的 set_config 返回值（用于验证"需重启"提示）。</summary>
+    public SetConfigResult NextSetConfigResult { get; set; } = new() { Ok = true };
+
+    /// <summary>
+    /// 可编程的状态提供器（每次调用返回一个新状态）。
+    /// 用于模拟"会话过一会儿才建立"的真实时序，验证轮询逻辑。
+    /// </summary>
+    public Func<StatusResult>? StatusProvider { get; set; }
+
+    /// <summary>GetStatusAsync 被调用的次数（验证轮询确实在跑）。</summary>
+    public int GetStatusCallCount { get; private set; }
+
     private void FailIfUnavailable()
     {
         if (Unavailable) throw new PipeUnavailableException("DeskLink.Client.default", "服务未运行（假）");
@@ -50,8 +62,11 @@ internal sealed class FakeServiceApi : IServiceApi
 
     public Task<StatusResult> GetStatusAsync(CancellationToken ct = default)
     {
+        // 先计数再判定可用性：调用方"尝试过几次"是独立于成败的信号
+        // （例如验证 Service 不可用时没有空转到超时）。
+        GetStatusCallCount++;
         FailIfUnavailable();
-        return Task.FromResult(StatusResult);
+        return Task.FromResult(StatusProvider is not null ? StatusProvider() : StatusResult);
     }
 
     public Task<ListPairingsResult> ListPairingsAsync(CancellationToken ct = default)
@@ -84,7 +99,7 @@ internal sealed class FakeServiceApi : IServiceApi
     {
         FailIfUnavailable();
         SetConfigCalls.Add((relayUrl, directPort));
-        return Task.FromResult(new SetConfigResult { Ok = true });
+        return Task.FromResult(NextSetConfigResult);
     }
 
     public Task<StartAgentResult> StartAgentAsync(bool inject, bool noInject, string? pipeOverride, CancellationToken ct = default)
@@ -103,6 +118,18 @@ internal sealed class FakeServiceApi : IServiceApi
     {
         FailIfUnavailable();
         return Task.FromResult(new EndSessionResult { Ok = true, Closed = 0 });
+    }
+
+    // ── direct_dial（缺陷①）──
+    public List<(string Pub, string Host, int Port)> DialCalls { get; } = new();
+    public DirectDialResultDto NextDialResult { get; set; } = new() { Ok = true, Transport = "quic" };
+
+    public Task<DirectDialResultDto> DialDirectAsync(
+        string peerPubB64, string host, int port, CancellationToken ct = default)
+    {
+        FailIfUnavailable();
+        DialCalls.Add((peerPubB64, host, port));
+        return Task.FromResult(NextDialResult);
     }
 
     public Task<FileScopeResult> GetFileScopeAsync(CancellationToken ct = default)

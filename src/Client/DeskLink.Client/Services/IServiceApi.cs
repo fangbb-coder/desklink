@@ -36,6 +36,14 @@ public interface IServiceApi
     /// <summary>被控端"随时断开"：关闭本机全部 E2E 会话（DESIGN 使用流程第 5 条）。</summary>
     Task<EndSessionResult> EndSessionAsync(CancellationToken ct = default);
 
+    /// <summary>
+    /// 控制端主动拨号到局域网对端（P5.5 出站方向）。
+    ///
+    /// 这是"局域网直连"路径**唯一**真正把连接建立起来的调用：没有它，
+    /// 客户端只是校验了 IP:端口然后假装连上了。
+    /// </summary>
+    Task<DirectDialResultDto> DialDirectAsync(string peerPubB64, string host, int port, CancellationToken ct = default);
+
     Task<FileScopeResult> GetFileScopeAsync(CancellationToken ct = default);
 
     Task<FileListResultDto> ListRemoteFilesAsync(string path, CancellationToken ct = default);
@@ -202,6 +210,10 @@ public sealed class ServiceApi : IServiceApi, IAsyncDisposable
 
     public Task<EndSessionResult> EndSessionAsync(CancellationToken ct = default)
         => InvokeAsync<EndSessionResult>("end_session", null, ct);
+
+    public Task<DirectDialResultDto> DialDirectAsync(string peerPubB64, string host, int port, CancellationToken ct = default)
+        => InvokeAsync<DirectDialResultDto>("direct_dial",
+            new DirectDialParams { PeerPubB64 = peerPubB64, Host = host, Port = port }, ct);
 
     public Task<FileScopeResult> GetFileScopeAsync(CancellationToken ct = default)
         => InvokeAsync<FileScopeResult>("file_scope", null, ct);

@@ -22,6 +22,15 @@ public interface IServiceCore
     StartAgentResult StartAgent(bool inject, bool noInject, string? pipeOverride, string? mediaPipe = null);
     void StopAgent();
 
+    /// <summary>
+    /// 控制端主动拨号到局域网对端（P5.5 出站方向）。
+    ///
+    /// 这是 WPF 客户端"局域网直连"路径的**唯一**实际拨号入口：没有它，
+    /// 客户端只能校验 IP:端口然后显示"已连接"，而对端从未被连上。
+    /// 方法在 SIGMA 完成、收发泵启动后返回 true；会话随后在后台维持。
+    /// </summary>
+    Task<DirectDialResultDto> DialDirectAsync(string peerPubB64, string host, int port, CancellationToken ct = default);
+
     /// <summary>被控端"随时断开"（DESIGN 使用流程第 5 条）：关闭本机全部 E2E 会话。</summary>
     EndSessionResult EndSession();
 

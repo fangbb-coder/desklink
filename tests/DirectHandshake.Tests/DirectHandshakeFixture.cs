@@ -52,6 +52,15 @@ public sealed class DirectHandshakeFixture : IAsyncDisposable
     /// <summary>直连客户端实例（已配置为连接服务端）。</summary>
     public DirectClient Client { get; }
 
+    /// <summary>
+    /// 出站拨号器（控制端角色的正式入口，P5.5）。
+    ///
+    /// 与 <see cref="Client"/> 的区别：Client 是裸的"连一次拿个 pump"，
+    /// DirectDialer 是 WPF 客户端 <c>direct_dial</c> RPC 背后真正用的那个——
+    /// 它维护出站会话表、顶替旧会话、支持撤销与关闭。
+    /// </summary>
+    public DirectDialer Dialer { get; }
+
     private DirectHandshakeFixture(string serverDir, string clientDir)
     {
         // 随机端口避免测试并行/串行时的 TIME_WAIT 冲突
@@ -80,6 +89,9 @@ public sealed class DirectHandshakeFixture : IAsyncDisposable
             log: null, enableQuic: !DisableQuicForTests);
 
         Client = new DirectClient(ClientKeys);
+
+        var clientOpts = new ServiceOptions { DataDir = clientDir };
+        Dialer = new DirectDialer(ClientKeys, ClientPairings, clientOpts, log: null);
     }
 
     /// <summary>启动一对已配对实例。</summary>
@@ -128,6 +140,7 @@ public sealed class DirectHandshakeFixture : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        await Dialer.DisposeAsync();
         await Server.StopAsync();
         try { Directory.Delete(Path.GetDirectoryName(ServerDataDir)!, true); } catch { }
     }

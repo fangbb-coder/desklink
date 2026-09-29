@@ -26,6 +26,9 @@ public sealed class DirectConnectResult
     public string? Detail { get; init; }
     public SessionPump? Pump { get; init; }
     public EncryptedSession? Session { get; init; }
+
+    /// <summary>实际使用的传输："quic" 或 "tcp-tls"。失败时为 null。</summary>
+    public string? Transport { get; init; }
 }
 
 /// <summary>局域网直连客户端。</summary>
@@ -52,11 +55,17 @@ public sealed class DirectClient
     /// 字典序更大时两侧都判定自己为 Responder → 双方都在等 InitiatorHello →
     /// 永久死锁（实测约 50% 的直连握手挂死）。
     /// </param>
+    /// <param name="startPump">
+    /// 是否在返回前启动收发泵。默认 true（CLI 探测等"拿到就能用"的调用方）。
+    /// <see cref="DirectDialer"/> 传 false：它必须先把控制流探针与文件传输引擎
+    /// 挂到 pump 上再 Start，否则对端立即发来的首帧会落在没有处理器的窗口里被丢弃。
+    /// </param>
     public async Task<DirectConnectResult> ConnectAsync(
         string host,
         int port,
         byte[] peerDeviceId,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool startPump = true)
     {
         if (peerDeviceId is null || peerDeviceId.Length != 32)
         {
@@ -77,6 +86,7 @@ public sealed class DirectClient
             return new DirectConnectResult { Ok = false, Detail = $"transport: {ex.Message}" };
         }
 
+        var transportName = transport is DirectQuicTransport ? "quic" : "tcp-tls";
         var sessionHost = new E2ESessionHost(keys, _log);
         E2ESessionResult e2e;
         using (var sigmaCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
@@ -107,12 +117,13 @@ public sealed class DirectClient
         }
 
         var pump = new SessionPump(transport, e2e.Session, _log);
-        pump.Start(ct);
+        if (startPump) pump.Start(ct);
         return new DirectConnectResult
         {
             Ok = true,
             Pump = pump,
             Session = e2e.Session,
+            Transport = transportName,
         };
     }
 

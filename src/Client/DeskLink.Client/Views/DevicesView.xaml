@@ -29,6 +29,8 @@
                 <TextBlock Text="IP:端口" Margin="16,0,6,0" VerticalAlignment="Center" />
                 <TextBox Width="180" Text="{Binding LanEndpointText, UpdateSourceTrigger=PropertyChanged}"
                          IsEnabled="{Binding IsLanMode}" />
+                <Button Content="输入地址…" Width="90" Margin="6,0,0,0" Click="OnPickLanEndpoint"
+                        IsEnabled="{Binding IsLanMode}" />
                 <Button Content="连接" Width="72" Margin="8,0,0,0" Command="{Binding ConnectCommand}" />
                 <Button Content="刷新" Width="72" Margin="8,0,0,0" Command="{Binding RefreshCommand}" />
             </StackPanel>

@@ -117,6 +117,48 @@ public sealed class MainViewModel : ObservableObject
     public void RefreshStatusBar() => OnPropertyChanged(nameof(StatusBarText));
 
     /// <summary>
+    /// 轮询等待**远端会话真正建立**后才允许 UI 进入远程页。
+    ///
+    /// 为什么必须有这一步（缺陷②）：媒体通道是**本机** Service 与本机客户端之间的
+    /// 管道，它连得上只说明本机两进程通了，**完全不能证明**对端在线。
+    /// 旧实现据此无条件 <c>MarkEstablished()</c>，于是选中一台离线设备点"连接"，
+    /// 界面立刻显示"已连接（…）"然后永远黑屏——用户被 UI 骗了。
+    ///
+    /// 这里改为以 Service 侧的真实会话状态为准：
+    ///   - 直连路径：<c>DirectActiveSessions &gt; 0</c>（含入站与出站会话）
+    ///   - 中继路径：<c>E2EState == "established"</c>
+    /// 超时返回 false，由调用方如实报错并留在设备页。
+    /// </summary>
+    public async Task<bool> WaitForRemoteSessionAsync(
+        bool requireDirect,
+        TimeSpan timeout,
+        CancellationToken ct = default)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            try
+            {
+                var s = await _api.GetStatusAsync(ct).ConfigureAwait(false);
+                var ready = requireDirect
+                    ? s.DirectActiveSessions > 0
+                    : s.E2EState == "established";
+                if (ready) return true;
+            }
+            catch (Exception ex) when (ex is PipeUnavailableException or PipeRpcException)
+            {
+                // Service 不可用时直接失败：轮询下去也不会有结果。
+                return false;
+            }
+
+            if (DateTime.UtcNow >= deadline) return false;
+            await Task.Delay(250, ct).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
     /// 轮询 Service 状态并刷新 IsControlled（被控端状态条可见性）。
     /// 由 MainWindow 的定时器周期调用（UI 线程，await 后回 UI 上下文）。
     ///

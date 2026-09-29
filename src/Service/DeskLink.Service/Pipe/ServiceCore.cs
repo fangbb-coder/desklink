@@ -31,9 +31,20 @@ public sealed class ServiceCore : IServiceCore
     private readonly RelayClient? _relay;
     private readonly RelaySessionRunner? _runner;
     private readonly DirectServer? _direct;
+    private readonly DirectDialer? _dialer;
     private readonly Media.MediaPipeServer? _media;
     private readonly Action<string>? _log;
     private volatile string _relayState = "disconnected";
+
+    /// <summary>
+    /// 启动时快照的"进程真正在用的"中继地址。
+    ///
+    /// RelayClient 在 Program.BuildHost 阶段按 options.RelayUrl 一次性构造，
+    /// 之后 <see cref="SetConfig"/> 改 <c>_options.RelayUrl</c> 不会重建连接。
+    /// 保留这个快照是为了让 GetConfig/GetStatus 能如实回答"现在连的是哪个中继"，
+    /// 而不是在用户改过配置后谎报新值。
+    /// </summary>
+    private readonly string? _activeRelayUrl;
 
     public ServiceCore(
         KeyStore keyStore,
@@ -44,6 +55,7 @@ public sealed class ServiceCore : IServiceCore
         RelayClient? relay,
         RelaySessionRunner? runner,
         DirectServer? direct,
+        DirectDialer? dialer,
         Media.MediaPipeServer? media,
         Action<string>? log)
     {
@@ -55,8 +67,10 @@ public sealed class ServiceCore : IServiceCore
         _relay = relay;
         _runner = runner;
         _direct = direct;
+        _dialer = dialer;
         _media = media;
         _log = log;
+        _activeRelayUrl = options.RelayUrl?.ToString();
 
         if (_relay != null)
         {
@@ -112,8 +126,19 @@ public sealed class ServiceCore : IServiceCore
             E2EPeerDeviceId = _runner?.PeerDeviceId is { } id ? Convert.ToHexString(id) : null,
             E2EControlRoundTripOk = _runner?.ControlRoundTripOk ?? false,
             E2ERttMs = _runner?.LastRttMs ?? -1,
-            DirectActiveSessions = _direct?.Sessions.Count ?? 0,
+            // 直连活跃会话 = 被控端入站会话（DirectServer）+ 控制端出站会话（DirectDialer）。
+            // 客户端据此判断"远程页该等中继会话还是等直连会话"。
+            DirectActiveSessions = AllDirectSessions().Count,
         };
+    }
+
+    /// <summary>本机全部直连会话：入站（被控端角色）+ 出站（控制端角色）。</summary>
+    private List<DirectSession> AllDirectSessions()
+    {
+        var all = new List<DirectSession>();
+        if (_direct is not null) all.AddRange(_direct.Sessions);
+        if (_dialer is not null) all.AddRange(_dialer.Sessions);
+        return all;
     }
 
     public ListPairingsResult ListPairings()
@@ -151,9 +176,12 @@ public sealed class ServiceCore : IServiceCore
         if (removed)
         {
             var peerDeviceId = E2ESessionHost.ComputeDeviceId(peerPub);
-            var closed = _direct?.CloseSessionsFor(peerDeviceId) ?? 0;
+            // 入站（被控端角色）与出站（控制端角色）都要踢——
+            // 否则本机主动拨出去的那条会话会继续活着，撤销形同虚设。
+            var closedIn = _direct?.CloseSessionsFor(peerDeviceId) ?? 0;
+            var closedOut = _dialer?.CloseSessionsFor(peerDeviceId) ?? 0;
             _log?.Invoke($"ServiceCore: revoked peer device_id={Convert.ToHexString(peerDeviceId)[..16]}..., " +
-                         $"closed {closed} direct session(s)");
+                         $"closed {closedIn} inbound + {closedOut} outbound direct session(s)");
             CloseRelaySession();
         }
     }
@@ -188,6 +216,7 @@ public sealed class ServiceCore : IServiceCore
         {
             DataDir = _options.DataDir,
             RelayUrl = _options.RelayUrl?.ToString(),
+            ActiveRelayUrl = _activeRelayUrl,
             DirectPort = _options.DirectPort,
             DirectEnabled = _firewall.QueryEnabled(_options.DirectPort),
         };
@@ -196,23 +225,91 @@ public sealed class ServiceCore : IServiceCore
     public SetConfigResult SetConfig(string? relayUrl, int? directPort)
     {
         var oldPort = _options.DirectPort;
+        var oldRelay = _options.RelayUrl?.ToString();
         var changed = false;
+
+        // 中继地址改了 → 标注"需重启"。
+        //
+        // 原因（不要在这里"顺手"重建连接）：RelayClient 持有到 relay 的传输、
+        // 信任策略（TOFU pin）与退避循环；在一个进行中的 E2E 会话里换掉它，
+        // 会话、文件传输与媒体通道都要跟着重建，失败面远大于收益。DESIGN 也
+        // 允许"路径由用户显式选择"。因此诚实做法是：存下来 + 明确告诉用户
+        // 什么时候生效，而不是弹"已保存"让人以为已经连上新中继。
+        var requiresRestart = false;
         if (relayUrl != null)
         {
             if (!Uri.TryCreate(relayUrl, UriKind.Absolute, out var u))
             {
                 throw new ArgumentException("relayUrl invalid");
             }
-            _options.RelayUrl = u;
-            changed = true;
+            if (u.ToString() != oldRelay)
+            {
+                _options.RelayUrl = u;
+                changed = true;
+                requiresRestart = true;
+            }
         }
+
+        // 直连端口是**立即生效**的：FirewallHelper.ApplyPortChange 真的删旧建新。
+        var firewallRepaired = false;
         if (directPort.HasValue && directPort.Value != oldPort)
         {
             _options.DirectPort = directPort.Value;
-            _firewall.ApplyPortChange(oldPort, directPort.Value);
+            firewallRepaired = _firewall.ApplyPortChange(oldPort, directPort.Value);
             changed = true;
         }
-        return new SetConfigResult { Ok = changed, FirewallRepaired = false };
+
+        return new SetConfigResult
+        {
+            Ok = changed,
+            FirewallRepaired = firewallRepaired,
+            RequiresRestart = requiresRestart,
+            RestartHint = requiresRestart
+                ? "中继地址已保存，但**需重启 DeskLinkService 后才会生效**（当前进程仍在使用旧地址）。"
+                : null,
+        };
+    }
+
+    /// <summary>
+    /// 控制端主动拨号到局域网对端（P5.5 出站方向）。
+    ///
+    /// 对端公钥用 base64 传入：与 pair / unpair 同一表示，便于客户端直接复用
+    /// 设备列表里的 <c>PeerPubB64</c>，不必在 UI 侧再做一次 base64↔device_id 换算。
+    /// </summary>
+    public async Task<DirectDialResultDto> DialDirectAsync(
+        string peerPubB64, string host, int port, CancellationToken ct = default)
+    {
+        if (_dialer is null)
+        {
+            return new DirectDialResultDto
+            {
+                Ok = false,
+                Detail = "本 Service 未装配出站拨号器，无法发起局域网直连",
+            };
+        }
+
+        byte[] peerDeviceId;
+        try
+        {
+            var pub = Convert.FromBase64String(peerPubB64);
+            if (pub.Length != 32)
+            {
+                return new DirectDialResultDto { Ok = false, Detail = "对端公钥长度非法（应为 32 字节）" };
+            }
+            peerDeviceId = E2ESessionHost.ComputeDeviceId(pub);
+        }
+        catch (FormatException)
+        {
+            return new DirectDialResultDto { Ok = false, Detail = "对端公钥不是合法 base64" };
+        }
+
+        var outcome = await _dialer.DialAsync(host, port, peerDeviceId, ct).ConfigureAwait(false);
+        return new DirectDialResultDto
+        {
+            Ok = outcome.Ok,
+            Detail = outcome.Detail,
+            Transport = outcome.Transport,
+        };
     }
 
     public StartAgentResult StartAgent(bool inject, bool noInject, string? pipeOverride, string? mediaPipe = null)
@@ -245,10 +342,11 @@ public sealed class ServiceCore : IServiceCore
     /// </summary>
     public EndSessionResult EndSession()
     {
-        var closed = _direct?.CloseAllSessions() ?? 0;
-        _log?.Invoke($"ServiceCore: end_session closed {closed} direct session(s)");
+        var closedIn = _direct?.CloseAllSessions() ?? 0;
+        var closedOut = _dialer?.CloseAllSessions() ?? 0;
+        _log?.Invoke($"ServiceCore: end_session closed {closedIn} inbound + {closedOut} outbound direct session(s)");
         CloseRelaySession();
-        return new EndSessionResult { Ok = true, Closed = closed };
+        return new EndSessionResult { Ok = true, Closed = closedIn + closedOut };
     }
 
     // ────────────────────────────────────────────────────────────────────────
@@ -256,7 +354,8 @@ public sealed class ServiceCore : IServiceCore
     // ────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// 取当前可用的文件传输引擎：优先中继会话，其次任一直连会话。
+    /// 取当前可用的文件传输引擎：优先中继会话，其次任一直连会话
+    /// （入站与出站都算——控制端主动拨出的会话同样可以传文件）。
     /// 两者共用同一份实现与同一套 scope（DESIGN：两条路径业务协议复用）。
     /// </summary>
     private FileTransferEngine? ActiveFileEngine()
@@ -264,13 +363,9 @@ public sealed class ServiceCore : IServiceCore
         var relayEngine = _runner?.FileEngine;
         if (relayEngine is not null) return relayEngine;
 
-        var sessions = _direct?.Sessions;
-        if (sessions is not null)
+        foreach (var s in AllDirectSessions())
         {
-            foreach (var s in sessions)
-            {
-                if (s.FileEngine is not null) return s.FileEngine;
-            }
+            if (s.FileEngine is not null) return s.FileEngine;
         }
         return null;
     }

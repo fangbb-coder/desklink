@@ -1,6 +1,11 @@
 <UserControl x:Class="DeskLink.Client.Views.SettingsView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <UserControl.Resources>
+        <!-- 与 RemoteView/StatusBar 一致：转换器定义在控件自身，
+             这样脱离 Application 实例也能加载（单测只构造窗口的场景）。 -->
+        <BooleanToVisibilityConverter x:Key="BoolToVisibility" />
+    </UserControl.Resources>
     <Grid Margin="12">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
@@ -20,6 +25,19 @@
                 </StackPanel>
                 <TextBlock Margin="90,4,0,0" Foreground="Gray" FontSize="11"
                            Text="scheme 决定传输：quic:// 强制 QUIC；tls:// 强制 TCP/TLS；https:// 优先 QUIC 可回落。首次连接需确认中继证书指纹。" />
+                <TextBlock Margin="90,2,0,0" Foreground="Gray" FontSize="11">
+                    <Run Text="当前生效：" />
+                    <Run>
+                        <Run.Text>
+                            <Binding Path="ActiveRelayUrl" FallbackValue="(未配置)" />
+                        </Run.Text>
+                    </Run>
+                </TextBlock>
+                <!-- 诚实性（缺陷③）：保存了但没重启时必须显式告知，不能只弹"已保存" -->
+                <TextBlock Margin="90,2,0,0" FontSize="11" Foreground="OrangeRed"
+                           FontWeight="Bold" TextWrapping="Wrap"
+                           Visibility="{Binding HasPendingRelayChange, Converter={StaticResource BoolToVisibility}}"
+                           Text="注意：上面保存的地址尚未生效，服务当前仍在使用“当前生效”的地址。请重启 DeskLinkService。" />
                 <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
                     <TextBlock Text="证书指纹" VerticalAlignment="Center" Width="90" />
                     <TextBlock Text="{Binding RelayCertificateFingerprint}" FontFamily="Consolas" VerticalAlignment="Center" />

@@ -62,7 +62,31 @@ pwsh -NoProfile -File tests/e2e-smoke.ps1 -Mode all -Transport both
 ```
 
 当前测试规模（`dotnet test DeskLink.sln`，全部真实断言、无 `Assert.True(true)` 占位）：
-Protocol 71 / Agent 137 / Client 102 / Service 163 / DirectHandshake 26 = **499 通过**。
+Protocol 71 / Service 176 / Client 120 / DirectHandshake 41 / Agent 137 = **545 通过**。
+
+> 2026-09-29 修复轮新增 46 个用例（见 [KnownIssues.md](./KnownIssues.md) 1.7 节：
+> 直连 UI 假接线 / 无条件"已连接" / 中继地址"已保存"但不生效）。
+
+### 直连与真机验收
+
+```powershell
+# 单机双实例直连演练（不需要第二台机器；不启动桌面代理，不会移动鼠标）
+pwsh -NoProfile -File tests/manual-lan-demo.ps1
+
+# 直连环境自检 / 会话状态 / 真实拨号 / 实时观察
+pwsh -NoProfile -File tests/verify-lan.ps1 -Mode preflight
+pwsh -NoProfile -File tests/verify-lan.ps1 -Mode status
+pwsh -NoProfile -File tests/verify-lan.ps1 -Mode dial -PeerPub <对端公钥> -Target <IP>:47200
+pwsh -NoProfile -File tests/verify-lan.ps1 -Mode watch
+```
+
+⚠ **直连必须双向配对**：中继由 registry 帮两端互存公钥，直连没有这个中介，
+缺任何一边都会在 SIGMA 之前被对端直接断开（报 `transport: ...软件中止了一个已建立的连接`，
+很容易误判成防火墙问题）。两端都要 `--pair-peer-pub <对方公钥>`。
+
+> 直连拨号现在由 UI 真正发起（`direct_dial` RPC → `DirectDialer`）。
+> 在此之前客户端只校验 IP:端口就显示"已连接"，而没有任何东西去拨号——
+> 详见 KnownIssues 1.7 节①。
 
 `e2e-smoke.ps1 -Mode relay` 会自行构建并拉起 registryd / relayd，注册两台设备、
 建立配对，然后以两个独立 `--data-dir` 启动 Service 实例，断言：

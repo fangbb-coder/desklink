@@ -205,8 +205,21 @@ public sealed class GetConfigResult
     [JsonPropertyName("data_dir")]
     public string DataDir { get; set; } = "";
 
+    /// <summary>已保存（可能尚未生效）的中继地址；见 <see cref="ActiveRelayUrl"/>。</summary>
     [JsonPropertyName("relay_url")]
     public string? RelayUrl { get; set; }
+
+    /// <summary>
+    /// **当前进程真正在用**的中继地址（启动时快照）。
+    ///
+    /// 为什么需要两个字段：RelayClient 在 <c>Program.BuildHost</c> 阶段按
+    /// <c>options.RelayUrl</c> 一次性构造，之后改 <c>_options.RelayUrl</c> 不会
+    /// 重建连接。若 UI 只回显 <see cref="RelayUrl"/>，用户改完地址会看到自己填的
+    /// 值，以为已经生效——实际上服务还在用旧地址连中继。分开暴露两个值，
+    /// UI 才能如实提示"已保存但需重启"。
+    /// </summary>
+    [JsonPropertyName("active_relay_url")]
+    public string? ActiveRelayUrl { get; set; }
 
     [JsonPropertyName("direct_port")]
     public int DirectPort { get; set; }
@@ -231,6 +244,49 @@ public sealed class SetConfigResult
 
     [JsonPropertyName("firewall_repaired")]
     public bool FirewallRepaired { get; set; }
+
+    /// <summary>
+    /// 本次保存里有**必须重启服务才生效**的项（目前只有中继地址）。
+    ///
+    /// 契约诚实性：UI 必须据此提示用户，不能弹"已保存"就当生效了。
+    /// direct_port 的改动是**立即生效**的（FirewallHelper.ApplyPortChange 真实写规则），
+    /// 所以它不置这个标志。
+    /// </summary>
+    [JsonPropertyName("requires_restart")]
+    public bool RequiresRestart { get; set; }
+
+    /// <summary>面向用户的说明文案（已本地化）；无需重启时为 null。</summary>
+    [JsonPropertyName("restart_hint")]
+    public string? RestartHint { get; set; }
+}
+
+/// <summary><c>direct_dial</c> 参数：以控制端身份主动拨向被控端的 <c>host:port</c>。</summary>
+public sealed class DirectDialParams
+{
+    /// <summary>对端 Ed25519 公钥（base64）——必须已在本地配对列表中。</summary>
+    [JsonPropertyName("peer_pub_b64")]
+    public string PeerPubB64 { get; set; } = "";
+
+    [JsonPropertyName("host")]
+    public string Host { get; set; } = "";
+
+    [JsonPropertyName("port")]
+    public int Port { get; set; }
+}
+
+/// <summary><c>direct_dial</c> 结果。</summary>
+public sealed class DirectDialResultDto
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; set; }
+
+    /// <summary>失败原因（已本地化，可直接显示给用户）。</summary>
+    [JsonPropertyName("detail")]
+    public string? Detail { get; set; }
+
+    /// <summary>实际使用的传输：quic / tcp-tls。</summary>
+    [JsonPropertyName("transport")]
+    public string? Transport { get; set; }
 }
 
 public sealed class StartAgentParams

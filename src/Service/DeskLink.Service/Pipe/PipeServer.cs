@@ -285,6 +285,17 @@ public sealed class PipeServer : IAsyncDisposable
                 case "stop_agent":
                     _core.StopAgent();
                     return Ok(req.Id, new { ok = true });
+                case "direct_dial":
+                {
+                    // 控制端主动拨号（P5.5 出站）。WPF 客户端"局域网直连"按钮
+                    // 走的就是这条 RPC——此前客户端只校验 IP:端口，从不拨号。
+                    var p = ParseParams<DirectDialParams>(req);
+                    if (p == null) return Error(req.Id, PipeErrorCode.InvalidParams, "params required");
+                    if (string.IsNullOrWhiteSpace(p.PeerPubB64))
+                        return Error(req.Id, PipeErrorCode.InvalidParams, "peer_pub_b64 required");
+                    var dial = await _core.DialDirectAsync(p.PeerPubB64, p.Host, p.Port, ct).ConfigureAwait(false);
+                    return Ok(req.Id, dial);
+                }
                 case "end_session":
                     return Ok(req.Id, _core.EndSession());
 

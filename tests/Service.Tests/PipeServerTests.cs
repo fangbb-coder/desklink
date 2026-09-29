@@ -57,11 +57,29 @@ internal sealed class StubServiceCore : IServiceCore
     {
         DataDir = "C:\\stub",
         RelayUrl = "https://stub",
+        ActiveRelayUrl = "https://stub",
         DirectPort = 47200,
         DirectEnabled = true,
     };
 
     public SetConfigResult SetConfig(string? relayUrl, int? directPort) => new() { Ok = true, FirewallRepaired = false };
+
+    // direct_dial 桩：记录参数并返回可断言的结果。
+    public bool DialDirectCalled;
+    public string? LastDialPeerPubB64;
+    public string? LastDialHost;
+    public int LastDialPort;
+    public DirectDialResultDto NextDialResult = new() { Ok = true, Transport = "quic" };
+
+    public Task<DirectDialResultDto> DialDirectAsync(
+        string peerPubB64, string host, int port, CancellationToken ct = default)
+    {
+        DialDirectCalled = true;
+        LastDialPeerPubB64 = peerPubB64;
+        LastDialHost = host;
+        LastDialPort = port;
+        return Task.FromResult(NextDialResult);
+    }
 
     public StartAgentResult StartAgent(bool inject, bool noInject, string? pipeOverride, string? mediaPipe = null)
     {
@@ -195,6 +213,72 @@ public class PipeServerTests : IAsyncDisposable
         var resp = await SendAsync(_clientPipe, "stop_agent", null);
         Assert.True(resp.RootElement.GetProperty("result").GetProperty("ok").GetBoolean());
         Assert.True(_core.StopAgentCalled);
+    }
+
+    // ───────────────── 缺陷①：direct_dial 派发 ─────────────────
+    //
+    // 这条 RPC 是 WPF 客户端"局域网直连"背后**唯一**真正拨号的东西。
+    // 此前客户端只校验 IP:端口就显示已连接，等于整条路径没有出口。
+
+    [Fact]
+    public async Task DirectDial_Forwards_Peer_Host_And_Port_To_Core()
+    {
+        var pub = Convert.ToBase64String(Enumerable.Range(0, 32).Select(i => (byte)i).ToArray());
+
+        var resp = await SendAsync(_clientPipe, "direct_dial", new
+        {
+            peer_pub_b64 = pub,
+            host = "192.168.1.20",
+            port = 47200,
+        });
+
+        Assert.True(_core.DialDirectCalled);
+        Assert.Equal(pub, _core.LastDialPeerPubB64);
+        Assert.Equal("192.168.1.20", _core.LastDialHost);
+        Assert.Equal(47200, _core.LastDialPort);
+
+        var result = resp.RootElement.GetProperty("result");
+        Assert.True(result.GetProperty("ok").GetBoolean());
+        Assert.Equal("quic", result.GetProperty("transport").GetString());
+    }
+
+    [Fact]
+    public async Task DirectDial_Failure_Detail_Is_Propagated()
+    {
+        _core.NextDialResult = new DirectDialResultDto
+        {
+            Ok = false,
+            Detail = "该设备不在本机配对列表中，请先完成配对",
+        };
+
+        var resp = await SendAsync(_clientPipe, "direct_dial", new
+        {
+            peer_pub_b64 = Convert.ToBase64String(new byte[32]),
+            host = "127.0.0.1",
+            port = 47200,
+        });
+
+        var result = resp.RootElement.GetProperty("result");
+        // 失败必须带可读原因，UI 才能告诉用户到底为什么没连上。
+        Assert.False(result.GetProperty("ok").GetBoolean());
+        Assert.Contains("配对", result.GetProperty("detail").GetString() ?? "", StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DirectDial_Without_PeerPub_Is_InvalidParams()
+    {
+        var resp = await SendAsync(_clientPipe, "direct_dial", new
+        {
+            host = "127.0.0.1",
+            port = 47200,
+        });
+
+        Assert.False(_core.DialDirectCalled);
+        Assert.False(resp.RootElement.TryGetProperty("result", out _));
+        var err = resp.RootElement.GetProperty("error");
+        // PipeError.Code 在契约里是数字枚举（PipeErrorCode.InvalidParams）。
+        Assert.Equal((int)DeskLink.Protocol.Pipe.PipeErrorCode.InvalidParams, err.GetProperty("code").GetInt32());
+        Assert.Contains("peer_pub_b64", err.GetProperty("message").GetString() ?? "", StringComparison.Ordinal);
     }
 
     [Fact]

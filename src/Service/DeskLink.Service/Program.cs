@@ -296,6 +296,22 @@ public static class Program
                 log);
         });
 
+        // 局域网直连**出站**拨号器（P5.5 控制端角色）。
+        //
+        // 与 DirectServer 的区别：不需要监听端口，因此**无条件注册**——
+        // 控制端机台上没有入站防火墙规则也必须能主动连出去。
+        // 这正是 WPF 客户端"局域网直连"所缺的那一环。
+        builder.Services.AddSingleton(sp =>
+        {
+            var lf = sp.GetRequiredService<ILoggerFactory>();
+            var log = (string msg) => lf.CreateLogger("DirectDialer").LogInformation("{Msg}", msg);
+            return new DirectDialer(
+                sp.GetRequiredService<KeyStore>(),
+                sp.GetRequiredService<PairingStore>(),
+                options,
+                log);
+        });
+
         // IServiceCore（管道 RPC 业务实现）
         builder.Services.AddSingleton<IServiceCore>(sp =>
         {
@@ -310,6 +326,7 @@ public static class Program
                 sp.GetService<RelayClient>(),   // null 安全：未配置 relay 时返回 null
                 sp.GetRequiredService<RelaySessionRunner>(),
                 sp.GetRequiredService<DirectServer>(),
+                sp.GetRequiredService<DirectDialer>(),
                 sp.GetRequiredService<MediaPipeServer>(),
                 log);
         });

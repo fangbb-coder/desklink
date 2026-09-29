@@ -103,6 +103,81 @@
   启动清一次 + 每小时 ticker。
 - **`IPLimiter` challenge 表只增不删**：加惰性 sweep（每分钟清理超 1 分钟的条目）。
 
+### 1.7 2026-09-29 修复轮：三个"UI 撒谎"缺陷
+
+> 起因是一次交付审查。三个缺陷的共同形态是：**界面告诉用户某件事发生了，
+> 而底层根本没发生**。单测能钉死它们，真机看不出来。
+
+#### ① 局域网直连的 UI 是"假接线"（最严重）
+
+**症状**：客户端设备页选"局域网直连"、填 IP:端口、点"连接" → 立刻跳远程页，
+然后永远黑屏。
+
+**根因**：`DirectConnectDialog` 在整个客户端**从未被 new 出来过**（全仓只有它自己的
+定义和注释）；`MainWindow.OnLanConnectApproved` 收到的 `endpoint` 只被拼进了状态栏
+字符串；`IServiceApi` 根本没有任何 dial/connect 方法。真正能建立直连会话的入口
+只有 `--direct-probe` 这个**一次性** CLI——它拨完就退出。
+
+也就是说 P5.5「局域网直连已交付」只在引擎层成立，**从 UI 完全不可用**。
+
+**修复**：
+- 新增 `DirectDialer`（`src/Service/DeskLink.Service/Direct/DirectDialer.cs`）——
+  控制端角色的出站拨号器。维护出站会话表、同对端顶替、撤销关闭、与
+  `DirectServer` 共用同一套业务处理器装配（避免两条路径行为漂移）。
+  拨号**返回即代表会话已建立**（SIGMA 完成、处理器挂好、泵已启动）。
+- 新增 `direct_dial` RPC：`PipeContract.DirectDialParams/DirectDialResultDto`
+  → `IServiceCore.DialDirectAsync` → `PipeServer` 派发 → `IServiceApi.DialDirectAsync`。
+- `DevicesViewModel.ConnectLan` 改为 `ConnectLanAsync`：先真拨号，**拨通才**通知 UI
+  跳远程页；失败留在设备页并显示服务端给的可读原因。
+- `DirectConnectDialog` 接进 `DevicesView`（"输入地址…"按钮），确认后回填地址框。
+- `ServiceCore` 的撤销 / `end_session` / 取文件引擎现在同时覆盖入站与出站会话
+  （`AllDirectSessions()`）。
+
+**验证**：`tests/DirectHandshake.Tests/DirectDialerTests.cs`（15 个用例）真起
+`DirectServer` + `DirectDialer`，断言**服务端真的观察到会话**、出站会话进活跃表、
+重复拨号顶替、撤销只关目标、未配对本地快速拒绝、无人监听时快速失败不挂起。
+另有 `tests/manual-lan-demo.ps1` 单机双实例演练（EXIT=0）。
+
+#### ② 点"连接"无条件显示"已连接"
+
+**根因**：`OpenMediaAsync` 只检查**本机**媒体管道连没连上，连上就 `MarkEstablished()`。
+媒体通道是本机 Service↔客户端的 IPC，**连得上完全不能证明对端在线**。选中一台离线
+设备点连接，UI 立刻显示"已连接（192.168.x.x:47200）"然后黑屏。中继路径因为 Service
+启动时会自动 `--peer` 拨号，恰好能对上，掩盖了这个设计问题。
+
+**修复**：`MainViewModel.WaitForRemoteSessionAsync` 轮询 `get_status`，以 Service 侧
+真实会话状态为准——直连看 `DirectActiveSessions > 0`（含入站+出站），中继看
+`E2EState == "established"`。超时 15s 返回 false，`MainWindow` 如实报错并**留在
+设备页**。`MarkEstablished()` 现在只在这道门禁通过后调用。
+
+#### ③ Settings 改中继地址"已保存"但不生效
+
+**根因**：`RelayClient` 在 `Program.BuildHost` 阶段按 `options.RelayUrl` 一次性构造；
+`ServiceCore.SetConfig` 只改 `_options.RelayUrl`，不重建连接。UI 弹"已保存"、
+返回 `ok=true`，且不提示。这是新用户必踩的坑。
+
+**修复**（选了"如实提示"而不是"热重建连接"）：
+- `SetConfigResult` 增加 `RequiresRestart` + `RestartHint`。
+- `GetConfigResult` 增加 `ActiveRelayUrl`——**进程真正在用的**地址（启动快照），
+  与"已保存但可能未生效"的 `RelayUrl` 分开暴露。
+- `SettingsViewModel` 保存后据此提示；加载时若两者不一致则高亮"当前生效：…"。
+- `direct_port` 的改动是**立即生效**的（`FirewallHelper.ApplyPortChange` 真写规则），
+  不置该标志。
+
+**为什么不热重建**：换掉 RelayClient 会牵动到 relay 的传输、TOFU 信任策略、退避循环
+以及进行中的 E2E 会话与媒体通道，失败面远大于收益。DESIGN 也允许路径由用户显式选择。
+
+#### 本轮新增的运维陷阱
+
+**直连必须双向配对。** 中继路径由 registry 帮两端互存公钥，直连没有这个中介：
+`DirectServer` 在 SIGMA 之前就查**本地**配对列表，缺任何一边都会在握手前被对端
+直接断开，表现为 `transport: 你的主机中的软件中止了一个已建立的连接`——很容易被
+误判成防火墙问题。两端都要执行 `--pair-peer-pub <对方公钥>`。
+
+**RPC 管道名是 `DeskLink.Client.{instance}`**，同实例还有 `DeskLink.Agent.*` /
+`DeskLink.Media.*` / `DeskLink.AgentMedia.*`（后两者是给桌面代理与媒体通道的）。
+写脚本连本机 Service 时容易只写 `DeskLink.{instance}`，表现为连接超时。
+
 ## 2. P7 桌面代理 —— 未在本机验证的 6 项
 
 以下能力**代码已实现且编译通过、部分逻辑有单测覆盖**，但没有在真实桌面场景下跑过。
@@ -210,7 +285,8 @@ Service 的两类管道（RPC 与媒体）都以 SYSTEM/Administrators/创建者
 | 命名管道字节序 | 一律 **big-endian**（`[u32 len BE][...]`）。历史上 RPC 管道曾是 little-endian 且与注释不符，已于 2026-09-27 统一。 |
 | 文件传输并发 | 引擎支持同一对端上的多条并发传输（按 transferId 区分），但 UI 当前串行发起。 |
 | symlink / junction 逃逸 | scope 校验按路径字符串，未拒绝**指向 scope 外**的符号链接/挂载点（审查项 M-5）。自用双端可信场景下风险可控；修复需加重解析点检查。 |
-| `SetConfig` 的 relayUrl 运行时不生效 | 中继地址只在 Service 启动时读取（审查项 M-6），改后需重启服务。 |
+| ~~`SetConfig` 的 relayUrl 运行时不生效~~ | **已修（2026-09-29）**：见 1.7 节③。`SetConfigResult.RequiresRestart` + `GetConfigResult.ActiveRelayUrl`，UI 如实提示"需重启 DeskLinkService"。中继地址仍需重启才生效（有意取舍），但不再假装已保存即生效。 |
+| 直连路径的双向配对 | 直连**必须两端互配**（中继由 registry 代劳，直连没有中介）。缺一边会在 SIGMA 前被对端断开，报 `transport: ...软件中止了一个已建立的连接`——易误判为防火墙问题。见 1.7 节"运维陷阱"。 |
 | scope 写回注册表未实现 | DESIGN 允许"会话内 scope 授权写回注册表作为常用目录"；当前 scope 仅来自 `--file-scope` 命令行参数，无持久化。 |
 | 撤销推送的丢失窗口 | 撤销恰逢目标设备离线时，registry→relay 推送会错过（审查中危#2）；设备重连时服务侧配对校验仍会拒绝，但 relay 旧接线要等会话自然超时。 |
 | regapi `verify-challenge` 无 nonce 去重 | 只有 relay 挑战有 `ChallengeReplayGuard`；registry HTTP 端点靠 Bearer token + IP 限速缓解。 |
@@ -218,20 +294,39 @@ Service 的两类管道（RPC 与媒体）都以 SYSTEM/Administrators/创建者
 
 ---
 
-## 6. 测试覆盖现状（2026-09-27）
+## 6. 测试覆盖现状（2026-09-29 更新）
 
 ```
-dotnet build DeskLink.sln                     → 0 警告 0 错误
-dotnet test  DeskLink.sln                     → 全部通过（499）
+dotnet build DeskLink.sln                     → 0 错误 / 103 警告(CA1416 平台兼容 + 1 xUnit1031)
+dotnet test  DeskLink.sln                     → 全部通过（545）
   Protocol.Tests        71
+  Service.Tests        176
+  Client.Tests         120
+  DirectHandshake.Tests 41
   Agent.Tests          137
-  Client.Tests         102
-  Service.Tests        163
-  DirectHandshake.Tests 26
 go build / go vet / gofmt -l                  → 干净
 go test ./... -count=1                        → 全部 ok
 pwsh tests/e2e-smoke.ps1 -Mode all -Transport both → EXIT=0
+pwsh tests/manual-lan-demo.ps1                → EXIT=0（单机双实例直连演练，见 1.7 节①）
 ```
+
+> 上一版记录的"499"是 2026-09-27 的数字。2026-09-29 的修复轮新增 46 个用例
+> （DirectDialer 端到端 15 / ServiceCore 配置与拨号 12 / PipeServer 派发 3 /
+> Client UI 诚实性 16），故为 545。
+>
+> 注：早先记录的"0 警告"只在**增量编译**时成立。全量重编会出现 103 个
+> `CA1416` 平台兼容性警告（`net9.0-windows` 下调用 Windows-only 的
+> `ProtectedData` / `PipeSecurity` / `QuicConnection` 等）——不影响正确性，
+> 但"0 警告"的说法应以"无 error CS"为准。
+
+### 新增的验收工具
+
+| 脚本 | 用途 |
+|---|---|
+| `tests/verify-lan.ps1` | 直连环境自检与拨号诊断。`-Mode preflight/status/dial/watch`；`-AsJson` 输出机器可读状态。`watch` 每秒刷新会话，便于观察连接/断开。 |
+| `tests/manual-lan-demo.ps1` | **单机**双实例直连演练（不需要第二台机器）：起被控端+控制端、双向配对、真实 `direct_dial`、断言两端都看到会话、断言未配对被本地拒绝。不启动桌面代理，因此**不会移动你的鼠标**。 |
+
+这两个脚本只证明**链路**通；画面与键鼠仍必须走 B1/B2 真机人工验收。
 
 冒烟覆盖：中继 TCP/QUIC 双传输的 SIGMA 握手 + 加密控制帧往返 + 真实 RTT +
 **P6 文件传输**（上传 + SHA256 对账 + 无残留 `.part` + 冲突 skip + 列目录 + scope 越界拒绝）+

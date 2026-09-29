@@ -81,10 +81,23 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// 等待远端会话建立的超时。中继路径下 Service 启动即自动拨号，但 SIGMA
+    /// + 中继接线仍要几百毫秒到数秒；给 15s 足够宽裕，又不会让用户干等。
+    /// </summary>
+    private static readonly TimeSpan SessionWaitTimeout = TimeSpan.FromSeconds(15);
+
     private async void OnRelayConnectApproved(DeviceItem device)
     {
         _vm.Remote.PeerLabel = device.Label;
         _vm.Remote.BeginConnect();
+
+        // 先确认 Service 侧真的有中继 E2E 会话，再进远程页（缺陷②）。
+        if (!await WaitForSessionAsync(requireDirect: false, device.Label, "中继"))
+        {
+            return;
+        }
+
         _vm.SelectedTabIndex = 1;
         await OpenMediaAsync($"中继 → {device.Label}");
     }
@@ -93,13 +106,50 @@ public partial class MainWindow : Window
     {
         _vm.Remote.PeerLabel = device.Label;
         _vm.Remote.BeginConnect();
+
+        // DevicesViewModel 已经真正拨过一次号（direct_dial），这里再确认一次
+        // 会话确实进了活跃表——RPC 返回 ok 与会话存活是两件事。
+        if (!await WaitForSessionAsync(requireDirect: true, device.Label, $"局域网直连 {endpoint}"))
+        {
+            return;
+        }
+
         _vm.SelectedTabIndex = 1;
         await OpenMediaAsync($"局域网直连 {endpoint}");
     }
 
     /// <summary>
+    /// 轮询等待真实会话建立；失败时如实报错并留在设备页（不跳远程页）。
+    /// </summary>
+    private async Task<bool> WaitForSessionAsync(bool requireDirect, string label, string path)
+    {
+        try
+        {
+            var ready = await _vm.WaitForRemoteSessionAsync(requireDirect, SessionWaitTimeout);
+            if (!ready)
+            {
+                var why = requireDirect
+                    ? "本机没有活跃的直连会话"
+                    : "Service 侧没有已建立的中继 E2E 会话";
+                _vm.Remote.MarkError($"{path} 未能建立远程会话：{why}。请确认对端在线且已配对。");
+                _vm.StatusText = "未能建立远程会话";
+                await _vm.Devices.RefreshAsync();
+                return false;
+            }
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// 打开媒体通道。Service 侧媒体管道尚在并行实现，连接失败时**如实报错**并退回
     /// 演示帧源（带显式标注），而不是假装已连上。
+    ///
+    /// 调用契约：只有 <c>WaitForSessionAsync</c> 确认过远端会话存在后才允许调用。
+    /// 本方法自己只负责本机管道；<c>MarkEstablished</c> 因此不再是无条件调用。
     /// </summary>
     private async Task OpenMediaAsync(string target)
     {
@@ -120,6 +170,7 @@ public partial class MainWindow : Window
             _sessionHost.StatsReceived += stats => Dispatcher.InvokeAsync(() => _vm.OnStats(stats));
             _sessionHost.Faulted += ex => Dispatcher.InvokeAsync(() => _vm.Remote.MarkError($"媒体通道错误：{ex.Message}"));
 
+            // 只有在**已经确认远端会话存在**的前提下才标记已建立（见 OpenMediaAsync 文档）。
             _vm.Remote.MarkEstablished();
             _vm.StatusText = $"已连接（{target}）";
         }
