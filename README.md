@@ -62,12 +62,16 @@ pwsh -NoProfile -File tests/e2e-smoke.ps1 -Mode all -Transport both
 ```
 
 当前测试规模（`dotnet test DeskLink.sln`，全部真实断言、无 `Assert.True(true)` 占位）：
-Protocol 71 / Service 176 / Client 120 / DirectHandshake 41 / Agent 137 / Panel 78 = **623 通过**。
+Protocol 71 / Service 176 / Client 123 / DirectHandshake 41 / Agent 137 / Panel 78 = **626 通过**。
 
 > 2026-09-29 修复轮新增 46 个用例（见 [KnownIssues.md](./KnownIssues.md) 1.7 节：
 > 直连 UI 假接线 / 无条件"已连接" / 中继地址"已保存"但不生效）。
 >
 > 同日新增 `DeskLink.Panel`（本机服务图形控制面板）与 78 个配套用例。
+>
+> 再修一处 WPF 绑定回归：`SettingsView` 把 `ActiveRelayUrl`（private setter）绑到
+> `Run.Text`（默认 TwoWay）导致**客户端每次启动即崩**。`WpfSmokeTests` 现在会真正
+> `Show()` 并渲染窗口 + 收集数据绑定错误，这类 bug 以后会被测试拦下。
 
 ### 图形化：DeskLink 控制面板
 

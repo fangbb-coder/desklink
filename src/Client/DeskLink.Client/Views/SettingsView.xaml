@@ -28,8 +28,14 @@
                 <TextBlock Margin="90,2,0,0" Foreground="Gray" FontSize="11">
                     <Run Text="当前生效：" />
                     <Run>
+                        <!--
+                          必须显式 Mode=OneWay：Run.Text 的默认绑定模式是 TwoWay，
+                          而 ActiveRelayUrl 只有 private setter（它是"服务当前在用"的值，
+                          不是用户可编辑的输入），WPF 会在运行时抛 InvalidOperationException
+                          导致整个客户端启动即崩。语义上它本来就只该显示。
+                        -->
                         <Run.Text>
-                            <Binding Path="ActiveRelayUrl" FallbackValue="(未配置)" />
+                            <Binding Path="ActiveRelayUrl" Mode="OneWay" FallbackValue="(未配置)" />
                         </Run.Text>
                     </Run>
                 </TextBlock>

@@ -106,11 +106,17 @@ public sealed class LocalServiceHost : IServiceHost, IAsyncDisposable
         if (exe is null) return false;
         try
         {
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(exe)
+            var psi = new System.Diagnostics.ProcessStartInfo(exe)
             {
                 UseShellExecute = true,
                 WorkingDirectory = Path.GetDirectoryName(exe) ?? _baseDir,
-            });
+            };
+            // 必须告诉客户端用哪个实例：客户端默认连 `DeskLink.Client.default`，
+            // 而面板是用 `--data-dir <用户选的>` 起的服务，实例名 = 该路径末段（小写）。
+            // 不传的话客户端会去连一个根本不存在的管道，表现为"打开了但全是连接失败"。
+            psi.ArgumentList.Add("--instance");
+            psi.ArgumentList.Add(_settings.InstanceId);
+            System.Diagnostics.Process.Start(psi);
             return true;
         }
         catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
