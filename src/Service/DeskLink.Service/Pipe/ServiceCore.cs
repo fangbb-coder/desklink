@@ -219,10 +219,16 @@ public sealed class ServiceCore : IServiceCore
             ActiveRelayUrl = _activeRelayUrl,
             DirectPort = _options.DirectPort,
             DirectEnabled = _firewall.QueryEnabled(_options.DirectPort),
+            FileScopeRoots = _options.FileScopeRoots.ToList(),
+            CaptureMonitorIndex = _options.CaptureMonitorIndex,
         };
     }
 
-    public SetConfigResult SetConfig(string? relayUrl, int? directPort)
+    public SetConfigResult SetConfig(
+        string? relayUrl,
+        int? directPort,
+        IReadOnlyList<string>? fileScopeRoots = null,
+        int? monitorIndex = null)
     {
         var oldPort = _options.DirectPort;
         var oldRelay = _options.RelayUrl?.ToString();
@@ -259,15 +265,77 @@ public sealed class ServiceCore : IServiceCore
             changed = true;
         }
 
+        // 授权目录与捕获显示器索引：**立即生效 + 落盘**。
+        //
+        // 落盘是修复"`--file-scope` 不持久化"的那一半：原先它只活在命令行里，
+        // 换个方式启动服务（不带该参数）授权就静默清空，文件功能无声失效。
+        // 另一半是 CommandLineParser 的两遍扫描——下次启动把这里写的值读回来。
+        var persistedOk = true;
+        if (fileScopeRoots is not null)
+        {
+            var normalized = fileScopeRoots
+                .Where(d => !string.IsNullOrWhiteSpace(d))
+                .Select(d => Path.GetFullPath(d))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (!normalized.SequenceEqual(_options.FileScopeRoots, StringComparer.OrdinalIgnoreCase))
+            {
+                _options.FileScopeRoots = normalized;
+                changed = true;
+                requiresRestart = true;   // 已在跑的会话持有旧 FileTransferScope
+            }
+        }
+        if (monitorIndex is not null && monitorIndex.Value != _options.CaptureMonitorIndex)
+        {
+            if (monitorIndex.Value < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(monitorIndex), "monitorIndex must be >= 0");
+            }
+            _options.CaptureMonitorIndex = monitorIndex.Value;
+            changed = true;
+            requiresRestart = true;   // Agent 已经带着旧索引起来了
+        }
+
+        if (fileScopeRoots is not null || monitorIndex is not null)
+        {
+            var store = new ServiceConfig
+            {
+                FileScopeRoots = _options.FileScopeRoots.ToList(),
+                CaptureMonitorIndex = _options.CaptureMonitorIndex,
+            };
+            persistedOk = store.Save(_options.DataDir);
+            if (!persistedOk)
+            {
+                _log?.Invoke("ServiceCore: service.json 写入失败，授权目录/显示器索引本次运行仍按内存值执行");
+            }
+        }
+
         return new SetConfigResult
         {
             Ok = changed,
             FirewallRepaired = firewallRepaired,
             RequiresRestart = requiresRestart,
-            RestartHint = requiresRestart
-                ? "中继地址已保存，但**需重启 DeskLinkService 后才会生效**（当前进程仍在使用旧地址）。"
-                : null,
+            Persisted = persistedOk,
+            RestartHint = BuildRestartHint(requiresRestart, persistedOk, fileScopeRoots is not null || monitorIndex is not null),
         };
+    }
+
+    private static string? BuildRestartHint(bool requiresRestart, bool persisted, bool touchedPersistentFields)
+    {
+        if (!requiresRestart) return null;
+
+        var parts = new List<string>();
+        if (!persisted)
+        {
+            parts.Add("⚠ **未能落盘**到 data-dir\\service.json（目录不可写？）——" +
+                      "本次运行已按新值执行，但**下次启动会退回旧值**。");
+        }
+        if (touchedPersistentFields)
+        {
+            parts.Add("文件授权目录 / 捕获显示器索引需要**重启 DeskLinkService 后才会对已建立的会话生效**。");
+        }
+        parts.Add("中继地址同样需重启后才会生效（当前进程仍在使用旧地址）。");
+        return string.Join("\n", parts);
     }
 
     /// <summary>
@@ -425,6 +493,35 @@ public sealed class ServiceCore : IServiceCore
         Target = o.TargetPath,
         Error = o.Error,
     };
+
+    /// <summary>
+    /// 本机在途传输的真实分块进度（供客户端在等长调用返回期间轮询）。
+    ///
+    /// 引擎里本来就有 <c>Snapshot()</c>，此前只是没人问它——所以界面上的进度条
+    /// 只能画 0% → 100%。这里原样透出：没有会话时返回空列表而不是错误，
+    /// 因为"现在没有进度"是常态，不是故障。
+    /// </summary>
+    public FileProgressResult GetFileProgress()
+    {
+        var result = new FileProgressResult();
+        var engine = ActiveFileEngine();
+        if (engine is null) return result;
+
+        foreach (var p in engine.Snapshot())
+        {
+            result.Transfers.Add(new FileProgressEntryDto
+            {
+                TransferId = p.TransferId,
+                Direction = p.Direction == TransferDirection.Sending ? "sending" : "receiving",
+                Path = p.Path,
+                TotalBytes = p.TotalBytes,
+                TransferredBytes = p.TransferredBytes,
+                Percent = p.Percent,
+                State = p.State,
+            });
+        }
+        return result;
+    }
 
     private static FileConflictPolicy ParsePolicy(string? raw) => (raw ?? "").Trim().ToLowerInvariant() switch
     {

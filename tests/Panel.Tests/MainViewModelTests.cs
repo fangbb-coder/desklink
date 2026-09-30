@@ -306,6 +306,77 @@ public class MainViewModelTests
     }
 
     [Fact]
+    public async Task 一键准备被控端会顺手配对主控端()
+    {
+        // 直连握手是双向 SIGMA：被控端不配主控端就��不上。
+        // 原来这里压根不配对，而主控端页的文案却让用户"到被控端页点配对"——流程真的走不通。
+        var (vm, host, _) = NewVm(h => h.IsAdministrator = true);
+        await vm.InitializeAsync();
+        vm.PeerPub = "PEERPUB==";
+
+        await vm.PrepareControlledAsync();
+
+        Assert.Equal("PEERPUB==", Assert.Single(host.PairedPubs));
+        Assert.Equal(1, host.StartCount);
+        vm.Dispose();
+    }
+
+    [Fact]
+    public async Task 一键准备被控端在提权重启前就配好对()
+    {
+        // PeerPub 只在内存里、不落盘：提权会以 runas 重启面板，那个框会被清空。
+        // 所以配对必须排在提权前面，否则用户填的公钥白填。
+        var (vm, host, _) = NewVm(h => h.IsAdministrator = false);
+        await vm.InitializeAsync();
+        vm.PeerPub = "PEERPUB==";
+
+        await vm.PrepareControlledAsync();
+
+        Assert.Equal("PEERPUB==", Assert.Single(host.PairedPubs));
+        vm.Dispose();
+    }
+
+    [Fact]
+    public async Task 一键准备被控端没填公钥时明说还没配对()
+    {
+        var (vm, host, _) = NewVm(h => h.IsAdministrator = true);
+        await vm.InitializeAsync();
+
+        await vm.PrepareControlledAsync();
+
+        Assert.Empty(host.PairedPubs);
+        Assert.Contains("还没配对", vm.StatusMessage);
+        vm.Dispose();
+    }
+
+    [Fact]
+    public async Task Quic文案跟着真实状态走()
+    {
+        // 界面上那行 QUIC 说明以前是写死的"可用"，本机不支持时也在撒谎。
+        var (yes, _, _) = NewVm();
+        await yes.InitializeAsync();
+        Assert.True(yes.QuicAvailable);
+        Assert.Contains("本机支持", yes.QuicText);
+
+        var (no, _, _) = NewVm(h => h.PrintConfigResult = new OneShotResult(0, """
+            ServiceOptions { DataDir=C:\dl, InstanceId=dl }
+            KeyStore: C:\dl\keystore.json
+              ed25519_pub_b64 = LOCALPUB0000000000000000000000000000000000000=
+              device_id       = AABBCC
+              quic_available  = false
+            """, ""));
+        await no.InitializeAsync();
+        Assert.False(no.QuicAvailable);
+        Assert.Contains("不支持", no.QuicText);
+        Assert.Contains("TCP-TLS", no.QuicText);
+        // 不可用时绝不能还说"可用"
+        Assert.DoesNotContain("本机支持", no.QuicText);
+
+        yes.Dispose();
+        no.Dispose();
+    }
+
+    [Fact]
     public async Task 一键准备控制端会关掉直连与注入代理()
     {
         var (vm, host, settings) = NewVm();
@@ -342,6 +413,117 @@ public class MainViewModelTests
         Assert.Empty(host.PairedPubs);
         Assert.Equal(1, host.StartCount);
         Assert.Contains("公钥", vm.StatusMessage);
+        vm.Dispose();
+    }
+
+    // ── 角色选项卡 ────────────────────────────────────────────────────────
+
+    [Fact]
+    public void 选项卡索引与角色一一对应_主控端在左()
+    {
+        var (vm, _, _) = NewVm();
+
+        // 界面约定：0 = 我是主控端（左边那一页），1 = 我是被控端
+        vm.SelectedRoleIndex = 0;
+        Assert.True(vm.IsController);
+        Assert.Equal(PanelRole.Controller, vm.Role);
+
+        vm.SelectedRoleIndex = 1;
+        Assert.False(vm.IsController);
+        Assert.Equal(PanelRole.Controlled, vm.Role);
+
+        vm.Dispose();
+    }
+
+    [Fact]
+    public void 切到主控端选项卡会同步角色_并在下一次保存时落盘()
+    {
+        var path = TempPath();
+        try
+        {
+            var (vm, _, settings) = NewVm();
+            vm.SelectedRoleIndex = 0;
+            Assert.Equal(PanelRole.Controller, settings.Role);
+
+            vm.SaveSettings(path);
+            Assert.Equal(PanelRole.Controller, PanelSettings.Load(path).Role);
+            vm.Dispose();
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    [Fact]
+    public void 越界的选项卡索引会被夹回有效范围_不会把面板搞成空白()
+    {
+        var (vm, _, _) = NewVm();
+        vm.SelectedRoleIndex = 0;
+
+        // TabControl 在内容尚未建好时可能推 -1 / 越界值进来
+        vm.SelectedRoleIndex = -1;
+        Assert.Equal(0, vm.SelectedRoleIndex);
+        Assert.True(vm.IsController);
+
+        vm.SelectedRoleIndex = 99;
+        Assert.Equal(1, vm.SelectedRoleIndex);
+        Assert.False(vm.IsController);
+        vm.Dispose();
+    }
+
+    [Fact]
+    public void 载入设置时选项卡会落到上次用的那一页()
+    {
+        var host = new FakeServiceHost();
+        var settings = new PanelSettings { Role = PanelRole.Controller };
+        var vm = new MainViewModel(host, settings);
+        vm.LoadFromSettings();
+
+        Assert.Equal(0, vm.SelectedRoleIndex);
+        Assert.True(vm.IsController);
+        vm.Dispose();
+    }
+
+    [Fact]
+    public async Task 一键准备被控端会自动切到被控端选项卡()
+    {
+        var (vm, _, _) = NewVm(h => h.IsAdministrator = true);
+        await vm.InitializeAsync();
+        vm.SelectedRoleIndex = 0;          // 先停在主控端页
+
+        await vm.PrepareControlledAsync();
+
+        Assert.Equal(1, vm.SelectedRoleIndex);
+        Assert.False(vm.IsController);
+        vm.Dispose();
+    }
+
+    [Fact]
+    public async Task 一键准备主控端会自动切到主控端选项卡()
+    {
+        var (vm, _, _) = NewVm();
+        await vm.InitializeAsync();
+        Assert.Equal(1, vm.SelectedRoleIndex);
+
+        await vm.PrepareControllerAsync();
+
+        Assert.Equal(0, vm.SelectedRoleIndex);
+        Assert.True(vm.IsController);
+        vm.Dispose();
+    }
+
+    [Fact]
+    public void 切选项卡只是换视图_不会顺手改直连与代理开关()
+    {
+        // 一键准备才该动 EnableDirect/InjectAgent；纯切页如果也改，
+        // 用户只是"想看看另一页"就把当前配置改了，是个静默的数据损坏。
+        var (vm, _, settings) = NewVm();
+        settings.EnableDirect = true;
+        settings.InjectAgent = true;
+        vm.LoadFromSettings();
+
+        vm.SelectedRoleIndex = 0;
+
+        Assert.True(vm.EnableDirect);
+        Assert.True(vm.InjectAgent);
         vm.Dispose();
     }
 

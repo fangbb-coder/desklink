@@ -51,6 +51,16 @@ public interface IServiceApi
     Task<FileTransferResultDto> UploadFileAsync(string local, string remote, string policy, CancellationToken ct = default);
 
     Task<FileTransferResultDto> DownloadFileAsync(string remote, string local, string policy, CancellationToken ct = default);
+
+    /// <summary>
+    /// 本机全部在途文件传输的**真实分块进度**。
+    ///
+    /// 存在的理由：<see cref="UploadFileAsync"/> / <see cref="DownloadFileAsync"/> 是
+    /// "一次调用、做完才返回"的长调用，等待期间界面拿不到任何中间信息，
+    /// 进度条只能画 0% → 100% 的假进度。等长调用时轮询本方法即可。
+    /// 没有会话时返回空列表（不是错误）。
+    /// </summary>
+    Task<FileProgressResult> GetFileProgressAsync(CancellationToken ct = default);
 }
 
 /// <summary>
@@ -228,6 +238,9 @@ public sealed class ServiceApi : IServiceApi, IAsyncDisposable
     public Task<FileTransferResultDto> DownloadFileAsync(string remote, string local, string policy, CancellationToken ct = default)
         => InvokeAsync<FileTransferResultDto>("file_download",
             new FileTransferParams { Local = local, Remote = remote, Policy = policy }, ct);
+
+    public Task<FileProgressResult> GetFileProgressAsync(CancellationToken ct = default)
+        => InvokeAsync<FileProgressResult>("file_progress", null, ct);
 
     public async ValueTask DisposeAsync()
     {

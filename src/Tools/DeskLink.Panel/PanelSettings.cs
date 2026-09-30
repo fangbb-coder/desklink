@@ -44,6 +44,13 @@ public sealed class PanelSettings
     /// <summary><c>--file-scope</c>：仅这些目录可被远端读取/写入。空列表 = 全盘可读（危险）。</summary>
     public List<string> FileScopeRoots { get; set; } = new();
 
+    /// <summary>
+    /// <c>--monitor</c>：捕获哪块显示器。0 = 主显示器（默认值，也是 Service 的默认行为）。
+    /// 多屏用户把它设成 1 / 2… 才有意义。**只对被控端生效**——主控端不产生画面。
+    /// 面板以前完全没有这个入口，用户只能去命令行里加，是"多显示器没法用"的根因。
+    /// </summary>
+    public int MonitorIndex { get; set; }
+
     public string? RelayUrl { get; set; }
 
     public bool InsecureRelayTls { get; set; }
@@ -88,6 +95,7 @@ public sealed class PanelSettings
         EnableDirect = EnableDirect,
         InjectAgent = InjectAgent,
         FileScopeRoots = new List<string>(FileScopeRoots),
+        MonitorIndex = MonitorIndex,
         RelayUrl = RelayUrl,
         InsecureRelayTls = InsecureRelayTls,
         Role = Role,

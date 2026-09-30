@@ -59,6 +59,9 @@ public sealed class TransferItem : ObservableObject
     private double _progress;
     private TransferState _state = TransferState.Running;
     private string _message = "";
+    private bool _progressKnown = true;
+    private long _transferredBytes;
+    private long _totalBytes;
 
     public required string Name { get; init; }
     public required bool IsUpload { get; init; }
@@ -66,13 +69,58 @@ public sealed class TransferItem : ObservableObject
     public required string RemotePath { get; init; }
     public FileConflictPolicy Policy { get; init; }
 
-    /// <summary>进度百分比。注意：当前 RPC 是"一次调用、完成才返回"，无流式进度，
-    /// 因此这里只能给出 0（进行中）→100（完成）的粗粒度值；真正的分块进度需要
-    /// Service 侧补一个流式/查询接口。</summary>
+    /// <summary>
+    /// 进度百分比（0~100），来自 Service 的 <c>file_progress</c> 真实分块进度。
+    ///
+    /// 老实现这里是"进行中恒 0、返回时跳 100"的假进度条；现在由
+    /// <see cref="FilesViewModel"/> 在等长调用期间轮询填入。
+    /// 若始终拿不到（Service 太老 / 没有会话），<see cref="ProgressKnown"/> 会转 false，
+    /// 界面改为显示不确定态，而不是假装 0%。
+    /// </summary>
     public double Progress
     {
         get => _progress;
         set => SetProperty(ref _progress, value);
+    }
+
+    /// <summary>本机是否真的拿到了分块进度。false 时界面不该把 Progress 当真值展示。</summary>
+    public bool ProgressKnown
+    {
+        get => _progressKnown;
+        set
+        {
+            if (SetProperty(ref _progressKnown, value))
+            {
+                OnPropertyChanged(nameof(ProgressText));
+            }
+        }
+    }
+
+    public long TransferredBytes
+    {
+        get => _transferredBytes;
+        set { if (SetProperty(ref _transferredBytes, value)) OnPropertyChanged(nameof(ProgressText)); }
+    }
+
+    public long TotalBytes
+    {
+        get => _totalBytes;
+        set { if (SetProperty(ref _totalBytes, value)) OnPropertyChanged(nameof(ProgressText)); }
+    }
+
+    /// <summary>进度条右侧的一行真实数字（"12.3 MB / 48.0 MB"），比一条光秃秃的条更可信。</summary>
+    public string ProgressText => ProgressKnown
+        ? $"{Format(TransferredBytes)} / {Format(TotalBytes)}（{Progress:0.#}%）"
+        : "未获取到分块进度";
+
+    internal static string Format(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} B";
+        double v = bytes;
+        string[] units = { "KB", "MB", "GB", "TB" };
+        int u = -1;
+        while (v >= 1024 && u < units.Length - 1) { v /= 1024; u++; }
+        return $"{v:0.#} {units[u]}";
     }
 
     public TransferState State
@@ -364,6 +412,12 @@ public sealed class FilesViewModel : ObservableObject
         // 暂停 = 取消在途 RPC（Service 侧按取消处理，保留 .part 与已确认分块）。
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         item.Cts = cts;
+        item.ProgressKnown = true;
+
+        // 与长调用并行轮询真实进度；传输一结束就停。
+        using var progressCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var progress = PollProgressAsync(item, progressCts.Token);
+
         try
         {
             // 冲突策略在此透传给 Service；不同文件可用不同策略（每次调用各自携带）。
@@ -376,7 +430,14 @@ public sealed class FilesViewModel : ObservableObject
                 item.Progress = 100;
                 item.State = TransferState.Completed;
                 item.Message = result.Target ?? "";
-                StatusMessage = $"{item.Name} 传输完成（{result.Bytes} 字节）";
+                item.TransferredBytes = result.Bytes;
+                if (item.TotalBytes <= 0) item.TotalBytes = result.Bytes;
+
+                // 传完了就是"全部传完"——这是我们确知的真值，不该因为中途没轮询到分块进度
+                // 而在完成瞬间还挂着"未获取到分块进度"。那会让用户以为结果不可信。
+                item.ProgressKnown = true;
+
+                StatusMessage = $"{item.Name} 传输完成（{TransferItem.Format(result.Bytes)}）";
             }
             else
             {
@@ -406,12 +467,70 @@ public sealed class FilesViewModel : ObservableObject
         }
         finally
         {
+            progressCts.Cancel();
+            await progress.ConfigureAwait(false);   // 不留下"孤儿轮询"继续刷进度
             item.Cts = null;
             Busy = false;
         }
 
         return item;
     }
+
+    /// <summary>
+    /// 轮询 Service 的 <c>file_progress</c>，把真实分块进度填回 <paramref name="item"/>。
+    ///
+    /// 匹配规则：方向 + 对端可见的相对路径。上传是 sending、下载是 receiving，
+    /// 路径都等于 <see cref="TransferItem.RemotePath"/>。同路径并发（界面上不会发生，
+    /// 因为 Busy 门禁）时取百分比最大的那条。
+    ///
+    /// 拿不到时把 <see cref="TransferItem.ProgressKnown"/> 置 false——**不假装 0%**。
+    /// 那正是本缺陷原来被投诉的地方：一条永远停在 0%、最后跳到 100% 的进度条。
+    /// </summary>
+    internal async Task PollProgressAsync(TransferItem item, CancellationToken ct)
+    {
+        var wantSending = item.IsUpload;
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                var snapshot = await _api.GetFileProgressAsync(ct).ConfigureAwait(false);
+                var match = snapshot.Transfers
+                    .Where(t => string.Equals(t.Direction, wantSending ? "sending" : "receiving", StringComparison.OrdinalIgnoreCase)
+                             && string.Equals(Normalize(t.Path), Normalize(item.RemotePath), StringComparison.OrdinalIgnoreCase))
+                    .OrderByDescending(t => t.Percent)
+                    .FirstOrDefault();
+
+                if (match is not null)
+                {
+                    item.Progress = Math.Clamp(match.Percent, 0, 100);
+                    item.TransferredBytes = match.TransferredBytes;
+                    item.TotalBytes = match.TotalBytes;
+                }
+                else
+                {
+                    item.ProgressKnown = false;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch (Exception)
+            {
+                // 轮询失败（Service 重启、管道断开、老版本不认识 file_progress）都不该
+                // 影响传输本身——传输的结论由长调用的返回值给出。
+                item.ProgressKnown = false;
+            }
+
+            try { await Task.Delay(ProgressPollInterval, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { return; }
+        }
+    }
+
+    /// <summary>进度轮询间隔。250ms 足够跟手，又不至于把管道刷爆。</summary>
+    public static readonly TimeSpan ProgressPollInterval = TimeSpan.FromMilliseconds(250);
+
+    private static string Normalize(string path) => (path ?? "").Replace('\\', '/').TrimStart('/');
 
     /// <summary>
     /// 仅切换 UI 状态（不取消在途调用）。供无取消源的场景（已完成/已失败条目重置）；

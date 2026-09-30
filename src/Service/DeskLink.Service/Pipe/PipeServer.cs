@@ -272,7 +272,7 @@ public sealed class PipeServer : IAsyncDisposable
                 {
                     var p = ParseParams<SetConfigParams>(req);
                     if (p == null) return Error(req.Id, PipeErrorCode.InvalidParams, "params required");
-                    var result = _core.SetConfig(p.RelayUrl, p.DirectPort);
+                    var result = _core.SetConfig(p.RelayUrl, p.DirectPort, p.FileScopeRoots, p.MonitorIndex);
                     return Ok(req.Id, result);
                 }
                 case "start_agent":
@@ -322,6 +322,9 @@ public sealed class PipeServer : IAsyncDisposable
                     var result = await _core.DownloadFileAsync(p.Remote, p.Local, p.Policy, ct).ConfigureAwait(false);
                     return Ok(req.Id, result);
                 }
+                case "file_progress":
+                    // 只读查询，不碰任何状态；长调用等待期间由客户端轮询真实分块进度。
+                    return Ok(req.Id, _core.GetFileProgress());
                 default:
                     return Error(req.Id, PipeErrorCode.MethodNotFound, $"unknown method: {req.Method}");
             }

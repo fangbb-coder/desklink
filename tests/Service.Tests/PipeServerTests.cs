@@ -60,9 +60,34 @@ internal sealed class StubServiceCore : IServiceCore
         ActiveRelayUrl = "https://stub",
         DirectPort = 47200,
         DirectEnabled = true,
+        FileScopeRoots = new List<string> { "C:\\stub\\share" },
+        CaptureMonitorIndex = 1,
     };
 
-    public SetConfigResult SetConfig(string? relayUrl, int? directPort) => new() { Ok = true, FirewallRepaired = false };
+    // set_config 桩：记录完整参数，便于断言新加的 file_scope / monitor 是否真的透下去了。
+    public string? LastSetRelayUrl;
+    public int? LastSetDirectPort;
+    public IReadOnlyList<string>? LastSetFileScopeRoots;
+    public int? LastSetMonitorIndex;
+    public bool LastSetOk = true;
+
+    public SetConfigResult SetConfig(
+        string? relayUrl,
+        int? directPort,
+        IReadOnlyList<string>? fileScopeRoots = null,
+        int? monitorIndex = null)
+    {
+        LastSetRelayUrl = relayUrl;
+        LastSetDirectPort = directPort;
+        LastSetFileScopeRoots = fileScopeRoots;
+        LastSetMonitorIndex = monitorIndex;
+        return new SetConfigResult { Ok = LastSetOk, FirewallRepaired = false, Persisted = LastSetOk };
+    }
+
+    // file_progress 桩：默认报"没有在途传输"，测试需要时自己塞。
+    public List<FileProgressEntryDto> ProgressEntries { get; } = new();
+
+    public FileProgressResult GetFileProgress() => new() { Transfers = ProgressEntries };
 
     // direct_dial 桩：记录参数并返回可断言的结果。
     public bool DialDirectCalled;
@@ -162,6 +187,69 @@ public class PipeServerTests : IAsyncDisposable
         var result = resp.RootElement.GetProperty("result");
         Assert.Equal("connected", result.GetProperty("relay_state").GetString());
         Assert.True(result.GetProperty("direct_enabled").GetBoolean());
+    }
+
+    [Fact]
+    public async Task GetConfig_带出文件授权目录与显示器索引()
+    {
+        var resp = await SendAsync(_clientPipe, "get_config", null);
+        var result = resp.RootElement.GetProperty("result");
+        Assert.Equal(
+            new[] { "C:\\stub\\share" },
+            result.GetProperty("file_scope_roots").EnumerateArray().Select(e => e.GetString()).ToArray());
+        Assert.Equal(1, result.GetProperty("capture_monitor_index").GetInt32());
+    }
+
+    [Fact]
+    public async Task SetConfig_把文件授权目录与显示器索引透传给Core()
+    {
+        var resp = await SendAsync(_clientPipe, "set_config", new
+        {
+            file_scope_roots = new[] { @"D:\share", @"E:\more" },
+            capture_monitor_index = 2,
+        });
+        Assert.True(resp.RootElement.GetProperty("result").GetProperty("ok").GetBoolean());
+        Assert.Equal(new[] { @"D:\share", @"E:\more" }, _core.LastSetFileScopeRoots);
+        Assert.Equal(2, _core.LastSetMonitorIndex);
+    }
+
+    [Fact]
+    public async Task SetConfig_回报是否真的落盘了()
+    {
+        _core.LastSetOk = true;
+        var ok = await SendAsync(_clientPipe, "set_config", new { capture_monitor_index = 1 });
+        Assert.True(ok.RootElement.GetProperty("result").GetProperty("persisted").GetBoolean());
+    }
+
+    [Fact]
+    public async Task FileProgress_无在途传输时返回空列表而不是null()
+    {
+        var resp = await SendAsync(_clientPipe, "file_progress", null);
+        var transfers = resp.RootElement.GetProperty("result").GetProperty("transfers");
+        Assert.Equal(0, transfers.GetArrayLength());
+    }
+
+    [Fact]
+    public async Task FileProgress_把在途传输的字节数如实报回去()
+    {
+        _core.ProgressEntries.Add(new FileProgressEntryDto
+        {
+            TransferId = 1,
+            Direction = "sending",
+            Path = @"share\big.bin",
+            TotalBytes = 2048,
+            TransferredBytes = 512,
+            Percent = 25,
+            State = "active",
+        });
+
+        var resp = await SendAsync(_clientPipe, "file_progress", null);
+        var t = resp.RootElement.GetProperty("result").GetProperty("transfers")[0];
+        Assert.Equal("sending", t.GetProperty("direction").GetString());
+        Assert.Equal(@"share\big.bin", t.GetProperty("path").GetString());
+        Assert.Equal(2048, t.GetProperty("total_bytes").GetInt64());
+        Assert.Equal(512, t.GetProperty("transferred_bytes").GetInt64());
+        Assert.Equal(25, t.GetProperty("percent").GetDouble());
     }
 
     [Fact]

@@ -237,6 +237,14 @@ public sealed class GetConfigResult
 
     [JsonPropertyName("direct_enabled")]
     public bool DirectEnabled { get; set; }
+
+    /// <summary>本机文件传输授权根目录（会持久化在 data-dir\service.json 里）。</summary>
+    [JsonPropertyName("file_scope_roots")]
+    public List<string> FileScopeRoots { get; set; } = new();
+
+    /// <summary>当前捕获的显示器索引（0 = 主显示器）。</summary>
+    [JsonPropertyName("capture_monitor_index")]
+    public int CaptureMonitorIndex { get; set; }
 }
 
 public sealed class SetConfigParams
@@ -246,6 +254,14 @@ public sealed class SetConfigParams
 
     [JsonPropertyName("direct_port")]
     public int? DirectPort { get; set; }
+
+    /// <summary>新的文件授权根目录（null = 不改；空数组 = 明确清空）。</summary>
+    [JsonPropertyName("file_scope_roots")]
+    public List<string>? FileScopeRoots { get; set; }
+
+    /// <summary>新的捕获显示器索引（null = 不改）。</summary>
+    [JsonPropertyName("capture_monitor_index")]
+    public int? MonitorIndex { get; set; }
 }
 
 public sealed class SetConfigResult
@@ -257,7 +273,7 @@ public sealed class SetConfigResult
     public bool FirewallRepaired { get; set; }
 
     /// <summary>
-    /// 本次保存里有**必须重启服务才生效**的项（目前只有中继地址）。
+    /// 本次保存里有**必须重启服务才生效**的项。
     ///
     /// 契约诚实性：UI 必须据此提示用户，不能弹"已保存"就当生效了。
     /// direct_port 的改动是**立即生效**的（FirewallHelper.ApplyPortChange 真实写规则），
@@ -269,6 +285,14 @@ public sealed class SetConfigResult
     /// <summary>面向用户的说明文案（已本地化）；无需重启时为 null。</summary>
     [JsonPropertyName("restart_hint")]
     public string? RestartHint { get; set; }
+
+    /// <summary>
+    /// 授权目录/显示器索引是否**成功落盘**到 data-dir\service.json。
+    /// false = 目录不可写：本次运行仍按新值执行，但下次启动会退回旧值。
+    /// UI 必须把这个区别说出来，否则用户会以为"以后都记住了"。
+    /// </summary>
+    [JsonPropertyName("persisted")]
+    public bool Persisted { get; set; } = true;
 }
 
 /// <summary><c>direct_dial</c> 参数：以控制端身份主动拨向被控端的 <c>host:port</c>。</summary>
@@ -404,4 +428,48 @@ public sealed class FileTransferResultDto
 
     [JsonPropertyName("error")]
     public string? Error { get; set; }
+}
+
+/// <summary>
+/// 一条在途传输的实时进度。
+///
+/// 为什么需要：<c>file_upload</c> / <c>file_download</c> 是"一次调用、做完才返回"的长调用，
+/// 在此之前客户端只能画出 0% → 100% 的假进度条。Service 侧引擎本来就有分块级进度
+/// （<c>FileTransferEngine.Snapshot()</c>），这里只是把它**暴露出去**，
+/// 客户端在等长调用返回期间轮询本接口即可拿到真实分块进度。
+/// </summary>
+public sealed class FileProgressEntryDto
+{
+    /// <summary>传输 id。客户端用它与本端发起的调用对应（对端发起的传输也会出现在这里）。</summary>
+    [JsonPropertyName("transfer_id")]
+    public uint TransferId { get; set; }
+
+    /// <summary>sending / receiving（从**本机**视角）。</summary>
+    [JsonPropertyName("direction")]
+    public string Direction { get; set; } = "";
+
+    /// <summary>对端看到的相对路径（发送方向=要传过去的名字；接收方向=对方发来的名字）。</summary>
+    [JsonPropertyName("path")]
+    public string Path { get; set; } = "";
+
+    [JsonPropertyName("total_bytes")]
+    public long TotalBytes { get; set; }
+
+    [JsonPropertyName("transferred_bytes")]
+    public long TransferredBytes { get; set; }
+
+    /// <summary>0~100，已在服务端算好（total=0 视为 100）。</summary>
+    [JsonPropertyName("percent")]
+    public double Percent { get; set; }
+
+    /// <summary>sending / receiving / paused / cancelled。</summary>
+    [JsonPropertyName("state")]
+    public string State { get; set; } = "";
+}
+
+public sealed class FileProgressResult
+{
+    /// <summary>本机全部在途传输；空数组表示当前没有会话或没有在途传输。</summary>
+    [JsonPropertyName("transfers")]
+    public List<FileProgressEntryDto> Transfers { get; set; } = new();
 }

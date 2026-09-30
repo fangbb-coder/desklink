@@ -76,13 +76,32 @@
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
                             <TextBlock Grid.Column="0" Text="{Binding Name}" />
-                            <ProgressBar Grid.Column="1" Minimum="0" Maximum="100" Value="{Binding Progress}" Height="16" />
-                            <TextBlock Grid.Column="2" Text="{Binding StateText}" Margin="8,0,0,0" />
+                            <!-- 拿不到分块进度时走不确定态，绝不停在 0% 装作"在传"。
+                                 真实数字在右侧 ProgressText 里，拿不到时它会明说"未获取到分块进度"。 -->
+                            <ProgressBar Grid.Column="1" Minimum="0" Maximum="100" Height="16">
+                                <ProgressBar.Style>
+                                    <Style TargetType="ProgressBar">
+                                        <Setter Property="Value" Value="{Binding Progress}" />
+                                        <Setter Property="IsIndeterminate" Value="False" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding ProgressKnown}" Value="False">
+                                                <Setter Property="IsIndeterminate" Value="True" />
+                                                <Setter Property="ToolTip"
+                                                        Value="Service 没有回报分块进度，这条条只表示「传输在进行」，不代表百分比" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </ProgressBar.Style>
+                            </ProgressBar>
+                            <TextBlock Grid.Column="2" Text="{Binding ProgressText}" Margin="8,0,0,0"
+                                       MinWidth="150" VerticalAlignment="Center" />
+                            <TextBlock Grid.Column="3" Text="{Binding StateText}" Margin="8,0,0,0" />
                             <!-- DESIGN「使用流程」：暂停和继续。暂停 = 取消在途调用（Service 保留 .part），
                                  继续 = 同参数重新发起（按 ack 位图续传）。仅在传输进行中可见。 -->
-                            <Button Grid.Column="3" Width="56" Margin="8,0,0,0" Content="暂停"
+                            <Button Grid.Column="4" Width="56" Margin="8,0,0,0" Content="暂停"
                                     Command="{Binding DataContext.PauseTransferCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
                                     CommandParameter="{Binding}">
                                 <Button.Style>
@@ -97,7 +116,7 @@
                                 </Button.Style>
                             </Button>
                             <!-- 继续：仅在已暂停时可见。 -->
-                            <Button Grid.Column="4" Width="56" Margin="4,0,0,0" Content="继续"
+                            <Button Grid.Column="5" Width="56" Margin="4,0,0,0" Content="继续"
                                     Command="{Binding DataContext.ResumeTransferCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
                                     CommandParameter="{Binding}">
                                 <Button.Style>

@@ -5,6 +5,7 @@
 //   --data-dir <path>           数据目录（覆盖默认 %ProgramData%\DeskLink）
 //   --relay-url <url>           中继入口 URL（QUIC 优先；TCP/TLS 兜底）
 //   --direct-port <port>        局域网直连端口（默认 47200）
+//   --monitor <n>               捕获哪块显示器（0=主显示器；仅被控端需要）
 //   --pipe-prefix <prefix>      命名管道名前缀（默认 DeskLink）
 //   --inject-agent              由 Service 启动 DeskLink.DesktopAgent（P7 接入真实路径）
 //   --print-config              打印解析后的配置后退出 0
@@ -37,12 +38,29 @@ public static class CommandLineParser
         public bool Ok => Error == null && !HelpRequested;
     }
 
+    /// <summary>
+    /// 生产入口：先廉价取出 --data-dir，据此读出 &lt;data-dir&gt;\service.json 里的
+    /// 持久化配置（文件授权目录、捕获显示器索引），再做完整解析。
+    ///
+    /// **命令行永远优先**于落盘值——落盘只负责"你没写时用上次那个"。
+    /// </summary>
     public static ParseResult Parse(string[] args)
+    {
+        var dataDir = ScanDataDir(args) ?? new ServiceOptions().DataDir;
+        return Parse(args, ServiceConfig.TryLoad(dataDir));
+    }
+
+    /// <summary>
+    /// 纯函数入口：<paramref name="persisted"/> 是上一次落盘（或测试构造）的配置，
+    /// 为 null 时行为与"从未持久化过"完全一致。
+    /// </summary>
+    public static ParseResult Parse(string[] args, ServiceConfig? persisted)
     {
         var options = new ServiceOptions();
         string? dataDirOverride = null;
         string? relayOverride = null;
         string? directPortOverride = null;
+        string? monitorOverride = null;
         string? pipePrefixOverride = null;
         string? peerOverride = null;
         string? pairPeerPub = null;
@@ -87,6 +105,13 @@ public static class CommandLineParser
                         return new ParseResult(options, false, "--direct-port requires a port", 2);
                     }
                     directPortOverride = args[++i];
+                    break;
+                case "--monitor":
+                    if (i + 1 >= args.Length)
+                    {
+                        return new ParseResult(options, false, "--monitor requires an index", 2);
+                    }
+                    monitorOverride = args[++i];
                     break;
                 case "--pipe-prefix":
                     if (i + 1 >= args.Length)
@@ -188,6 +213,14 @@ public static class CommandLineParser
             }
             options.DirectPort = port;
         }
+        if (monitorOverride != null)
+        {
+            if (!int.TryParse(monitorOverride, out var mon) || mon < 0)
+            {
+                return new ParseResult(options, false, $"--monitor invalid (must be >= 0): {monitorOverride}", 2);
+            }
+            options.CaptureMonitorIndex = mon;
+        }
         if (pipePrefixOverride != null)
         {
             options.PipeNamePrefix = pipePrefixOverride;
@@ -211,11 +244,22 @@ public static class CommandLineParser
         options.InsecureRelayTls = insecureRelayTls;
         options.EnableDirect = enableDirect;
         // 授权目录一律解析成绝对路径（scope 判定依赖绝对路径），并去重。
-        options.FileScopeRoots = fileScopes
+        // 合并规则：**命令行优先**——命令行给了 --file-scope 就完全以它为准；
+        // 一个都没给时才回落到上次落盘的 service.json（这就是"持久化"）。
+        var scoped = fileScopes
             .Where(d => !string.IsNullOrWhiteSpace(d))
             .Select(d => Path.GetFullPath(d))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
+        if (scoped.Count == 0 && persisted is not null)
+        {
+            scoped = new List<string>(persisted.FileScopeRoots);
+        }
+        options.FileScopeRoots = scoped;
+        if (monitorOverride is null && persisted is not null && persisted.CaptureMonitorIndex > 0)
+        {
+            options.CaptureMonitorIndex = persisted.CaptureMonitorIndex;
+        }
         options.PairPeerPub = pairPeerPub;
         options.DirectProbe = directProbe;
 
@@ -260,11 +304,12 @@ public static class CommandLineParser
           --data-dir <path>          数据目录（默认 %ProgramData%\DeskLink）
           --relay-url <url>          中继入口 URL(quic:// 强制 QUIC / tls:// 强制 TCP-TLS / https:// 优先 QUIC 回落 TCP-TLS)
           --direct-port <port>       局域网直连端口（默认 47200）
+          --monitor <n>              捕获哪块显示器（0=主显示器；仅被控端需要；可用 DeskLink.DesktopAgent --list-monitors 查索引）
           --pipe-prefix <prefix>     命名管道名前缀（默认 DeskLink）
           --peer <device_id>         对端 device_id（hex 或 base64）；缺省回退 pairings.json
           --insecure-relay-tls       关闭中继 TLS 的 TOFU 指纹校验（仅本机联调；生产勿用）
           --enable-direct            启动局域网直连监听（被控端；默认端口 47200）
-          --file-scope <dir>         文件传输授权目录（可重复；不指定则一律拒绝）
+          --file-scope <dir>         文件传输授权目录（可重复；不指定则回落到上次落盘的 <data-dir>\service.json）
           --pair-peer-pub <key>      把对端 Ed25519 公钥(hex/base64)加入本机配对列表后退出(运维/联调)
           --direct-probe <host:port> 作为控制端发起一次直连探测，打印 JSON 后退出(运维/联调)
           --firewall-set <port> <on|off>  放行/回收入站规则后退出(需管理员；供安装程序调用)
@@ -277,7 +322,22 @@ public static class CommandLineParser
         注意：
           --no-inject 由 AgentLauncher 在启动 Agent 子进程时强制校验，
           不作为本进程启动参数。
+          授权目录与捕获显示器索引会落盘到 <data-dir>\service.json，下次启动自动读回；
+          命令行显式传入时以命令行为准。
         """;
+
+    /// <summary>
+    /// 第一遍扫描：只取 --data-dir（service.json 就放在这个目录里，所以得先知道它）。
+    /// 没给就用 <see cref="ServiceOptions"/> 的默认目录。
+    /// </summary>
+    private static string? ScanDataDir(string[] args)
+    {
+        for (int i = 0; i < args.Length; i++)
+        {
+            if (args[i] == "--data-dir" && i + 1 < args.Length) return args[i + 1];
+        }
+        return null;
+    }
 
     private static bool TryParsePort(string text, out int port)
         => int.TryParse(text, out port) && port > 0 && port <= 65535;

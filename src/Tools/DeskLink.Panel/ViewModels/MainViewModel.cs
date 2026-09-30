@@ -1,8 +1,12 @@
-// DeskLink.Panel —— 主视图模型：被控端 / 控制端两套流程的全部按钮逻辑
+// DeskLink.Panel —— 主视图模型：主控端 / 被控端两套流程的全部按钮逻辑
 //
 // 设计取向：把"用户下一步该做什么"直接写在界面上，而不是让用户自己拼命令行。
-//   被控端 = 放开防火墙 + 开直连 + 注入代理 + 起服务 → 把公钥和 IP:端口给对方
-//   控制端 = 起服务 + 配对 → 打开控制界面 → 设备页选直连填 IP
+//   被控端 = 放开防火墙 + 开直连 + 注入代理 + 起服务 → 把公钥和 IP:端口给主控端
+//   主控端 = 起服务 + 双向配对 → 打开控制界面 → 设备页选直连填 IP
+//
+// 界面是**两个角色选项卡**（「我是主控端」在左、「我是被控端」在右），
+// 本机服务/高级设置/日志是两个角色共用的，放在选项卡外面。
+// 切选项卡只是换视图，不会顺手改 EnableDirect/InjectAgent——那属于「一键准备」的动作。
 //
 // 关键约束：本类**不碰任何进程与管道**，全部经 IServiceHost 抽象，
 // 因此所有按钮逻辑都能在 tests\Panel.Tests 里用 FakeServiceHost 脱离进程验证。
@@ -64,7 +68,22 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public string LocalEndpoint { get => _localEndpoint; private set => SetField(ref _localEndpoint, value); }
 
     private bool _quicAvailable;
-    public bool QuicAvailable { get => _quicAvailable; private set => SetField(ref _quicAvailable, value); }
+    public bool QuicAvailable
+    {
+        get => _quicAvailable;
+        private set { if (SetField(ref _quicAvailable, value)) OnPropertyChanged(nameof(QuicText)); }
+    }
+
+    /// <summary>
+    /// QUIC 的真实状态。
+    ///
+    /// 这一行以前是**写死**的"QUIC 可用：…"，于是本机根本不支持 QUIC 时界面也在说可用——
+    /// 正是本项目反复在修的"UI 撒谎"。现在两个分支都把话说满：
+    /// 不可用时明说不可用，不要让用户以为是防火墙问题。
+    /// </summary>
+    public string QuicText => QuicAvailable
+        ? "QUIC：本机支持。能否真的走 QUIC 还取决于两端系统与防火墙的 UDP 规则。"
+        : "QUIC：本机不支持，只能走 TCP-TLS。直连端口的 TCP 规则必须放行。";
 
     // ── 运行状态 ────────────────────────────────────────────────────────────
 
@@ -131,6 +150,24 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private string _fileScopeText = "";
     public string FileScopeText { get => _fileScopeText; set => SetField(ref _fileScopeText, value); }
 
+    private int _monitorIndex;
+    /// <summary>
+    /// 捕获哪块显示器（0 = 主显示器）。**只有被控端需要**：主控端不产生画面。
+    /// 负数在 <see cref="SaveSettings"/> 里被夹回 0，不会让 Service 拿到非法 <c>--monitor</c>。
+    /// </summary>
+    public int MonitorIndex
+    {
+        get => _monitorIndex;
+        set
+        {
+            if (SetField(ref _monitorIndex, value)) OnPropertyChanged(nameof(MonitorIndexText));
+        }
+    }
+
+    public string MonitorIndexText => MonitorIndex > 0
+        ? $"第 {MonitorIndex + 1} 块屏幕（索引 {MonitorIndex}）"
+        : "第 1 块屏幕（主显示器）";
+
     private string? _relayUrl;
     public string? RelayUrl { get => _relayUrl; set => SetField(ref _relayUrl, value); }
 
@@ -139,6 +176,50 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private bool _isController;
     public bool IsController { get => _isController; private set => SetField(ref _isController, value); }
+
+    /// <summary>
+    /// 角色选项卡的选中索引：<b>0 = 我是主控端，1 = 我是被控端</b>。
+    ///
+    /// 刻意**不**与 <see cref="PanelRole"/> 的数值对齐：PanelRole.Controlled = 0、Controller = 1，
+    /// 而 panel.json 是按**数字**落盘的（JsonOptions 没配 JsonStringEnumConverter），
+    /// 将来若把枚举顺序反过来，老用户已保存的角色会被静默读成另一个角色。
+    /// </summary>
+    private int _selectedRoleIndex = 1;
+
+    public int SelectedRoleIndex
+    {
+        get => _selectedRoleIndex;
+        set
+        {
+            // TabControl 在内容还没建好时可能推 -1 / 2 过来，夹回合法范围，
+            // 否则界面上会出现"两个选项卡都没选中"的空白面板。
+            var index = Math.Clamp(value, 0, 1);
+            if (index == _selectedRoleIndex) return;
+            _selectedRoleIndex = index;
+            OnPropertyChanged(nameof(SelectedRoleIndex));
+            ApplyRole(index == 0 ? PanelRole.Controller : PanelRole.Controlled);
+        }
+    }
+
+    /// <summary>当前角色（由选项卡索引派生，供落盘用）。</summary>
+    public PanelRole Role => IsController ? PanelRole.Controller : PanelRole.Controlled;
+
+    /// <summary>
+    /// 角色落地的**唯一**入口。切选项卡和「一键准备」都走这里——
+    /// 两处各改一半会漏掉 _settings.Role，下次启动就跳回另一个角色。
+    /// </summary>
+    private void ApplyRole(PanelRole role)
+    {
+        IsController = role == PanelRole.Controller;
+        _settings.Role = role;
+
+        var index = IsController ? 0 : 1;
+        if (index != _selectedRoleIndex)
+        {
+            _selectedRoleIndex = index;
+            OnPropertyChanged(nameof(SelectedRoleIndex));
+        }
+    }
 
     public ObservableCollection<string> Log { get; } = new();
 
@@ -183,8 +264,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         if (BannerLevel == BannerLevel.Info)
         {
             Banner(BannerLevel.Info, _isController
-                ? "控制端就绪。粘贴对方公钥完成配对，然后点『打开控制界面』。"
-                : "被控端就绪。点『一键准备被控端』，然后把上面的公钥和地址发给控制端。");
+                ? "主控端就绪。在本页粘贴被控端的公钥完成配对，然后点『打开控制界面』。"
+                : "被控端就绪。在本页点『一键准备被控端』，然后把公钥和地址发给主控端。");
         }
     }
 
@@ -195,9 +276,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         EnableDirect = _settings.EnableDirect;
         InjectAgent = _settings.InjectAgent;
         FileScopeText = string.Join(";", _settings.FileScopeRoots);
+        MonitorIndex = _settings.MonitorIndex > 0 ? _settings.MonitorIndex : 0;
         RelayUrl = _settings.RelayUrl;
-        _isController = _settings.Role == PanelRole.Controller;
-        OnPropertyChanged(nameof(IsController));
+        ApplyRole(_settings.Role);
     }
 
     /// <summary>
@@ -213,8 +294,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _settings.FileScopeRoots = (FileScopeText ?? "")
             .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .ToList();
+        _settings.MonitorIndex = MonitorIndex > 0 ? MonitorIndex : 0;
         _settings.RelayUrl = string.IsNullOrWhiteSpace(RelayUrl) ? null : RelayUrl.Trim();
-        _settings.Role = _isController ? PanelRole.Controller : PanelRole.Controlled;
+        _settings.Role = Role;
 
         var ok = _settings.Save(path);
         if (ok) Banner(BannerLevel.Ok, "设置已保存。");
@@ -250,12 +332,18 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         finally { End(); }
     }
 
-    public async Task PairAsync()
+    public async Task PairAsync() => await TryPairAsync().ConfigureAwait(true);
+
+    /// <summary>
+    /// 真去配对，返回是否成功。横幅由本方法负责给出，调用方不要重复播报。
+    /// 拆出返回值是为了让「一键准备」能把"到底配没配上"并进它自己的收尾提示里。
+    /// </summary>
+    private async Task<bool> TryPairAsync()
     {
         var peer = (PeerPub ?? "").Trim();
-        if (string.IsNullOrWhiteSpace(peer)) { Banner(BannerLevel.Warn, "请先粘贴对方的公钥。"); return; }
+        if (string.IsNullOrWhiteSpace(peer)) { Banner(BannerLevel.Warn, "请先粘贴对方的公钥。"); return false; }
 
-        if (!Begin("正在配对…")) return;
+        if (!Begin("正在配对…")) return false;
         try
         {
             var r = await _host.PairAsync(peer).ConfigureAwait(true);
@@ -263,11 +351,11 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             {
                 Banner(BannerLevel.Ok, "配对成功。**记得让对方也配回来**——直连必须两边都配，否则会被对端在握手前断开。");
                 await RefreshStatusAsync().ConfigureAwait(true);
+                return true;
             }
-            else
-            {
-                Banner(BannerLevel.Error, $"配对失败（退出码 {r.ExitCode}）：{FirstLine(r.Combined)}");
-            }
+
+            Banner(BannerLevel.Error, $"配对失败（退出码 {r.ExitCode}）：{FirstLine(r.Combined)}");
+            return false;
         }
         finally { End(); }
     }
@@ -366,8 +454,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     /// <summary>被控端一键准备：开直连 + 注入代理 + 放行防火墙 + 起服务。</summary>
     public async Task PrepareControlledAsync()
     {
-        _isController = false;
-        OnPropertyChanged(nameof(IsController));
+        ApplyRole(PanelRole.Controlled);
         _settings.ApplyRoleDefaults(PanelRole.Controlled);
         EnableDirect = _settings.EnableDirect;
         InjectAgent = _settings.InjectAgent;
@@ -380,26 +467,35 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             Banner(BannerLevel.Info, $"共享目录默认为 {share}，可在下方改。远程只能读写这个目录。");
         }
 
+        // 先配对、再提权。
+        // 顺序有讲究：PeerPub 存在内存里、不落盘，提权重启会把这个框清空；
+        // 而配对走的是 --pair-peer-pub 一次性子命令，本来就不需要管理员权限。
+        var paired = !string.IsNullOrWhiteSpace(PeerPub) && await TryPairAsync().ConfigureAwait(true);
+
         if (!_host.IsAdministrator)
         {
             SaveSettings();
             Banner(BannerLevel.Warn, "放行入站端口需要管理员权限，正在以管理员身份重新打开面板…");
             if (_host.TryRestartElevated()) { ElevationRequested?.Invoke(); return; }
-            Banner(BannerLevel.Error, "提权被拒绝。可先点『启动服务』跳过这一步，但控制端可能连不上。");
+            Banner(BannerLevel.Error, "提权被拒绝。可先点『启动服务』跳过这一步，但主控端可能连不上。");
         }
 
         await ToggleFirewallAsync().ConfigureAwait(true);
         if (!_host.IsAdministrator) return;   // 提权失败/被拒：已经提示过了，别再起服务造成半配置状态
 
         await StartServiceAsync().ConfigureAwait(true);
-        Banner(BannerLevel.Ok, "被控端已就绪。把上面的【公钥】和【本机地址】发给控制端即可。");
+
+        // 配没配上是此刻唯一还没定的事，必须留在最显眼的位置说清楚。
+        var pending = paired
+            ? ""
+            : "【还没配对】把主控端的公钥粘进本页的『对方的公钥』输入框，点『配对』。\n";
+        Banner(BannerLevel.Ok, pending + "被控端已就绪。把本页的【公钥】和【本机地址】发给主控端即可。");
     }
 
-    /// <summary>控制端一键准备：关掉用不上的开关 + 起服务（+ 有公钥就顺手配对）。</summary>
+    /// <summary>主控端一键准备：关掉用不上的开关 + 起服务（+ 有公钥就顺手配对）。</summary>
     public async Task PrepareControllerAsync()
     {
-        _isController = true;
-        OnPropertyChanged(nameof(IsController));
+        ApplyRole(PanelRole.Controller);
         _settings.ApplyRoleDefaults(PanelRole.Controller);
         EnableDirect = _settings.EnableDirect;
         InjectAgent = _settings.InjectAgent;
@@ -407,7 +503,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
         if (string.IsNullOrWhiteSpace(PeerPub))
         {
-            Banner(BannerLevel.Warn, "还没填对方公钥。拿到被控端的公钥后填进去再点一次『一键准备控制端』即可完成配对。");
+            Banner(BannerLevel.Warn, "还没填被控端的公钥。拿到后粘进本页的『被控端公钥』输入框，再点一次『一键准备主控端』即可完成配对。");
         }
         else
         {
@@ -415,11 +511,11 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
 
         await StartServiceAsync().ConfigureAwait(true);
-        // 别把上面那条"还没填公钥"覆盖掉——它才是控制端用户此刻唯一未完成的事。
+        // 别把上面那条"还没填公钥"覆盖掉——它才是主控端用户此刻唯一未完成的事。
         var pending = string.IsNullOrWhiteSpace(PeerPub)
-            ? "【还没配对】把被控端的公钥填进上面的输入框再点一次本按钮。\n"
+            ? "【还没配对】把被控端的公钥填进本页的输入框再点一次本按钮。\n"
             : "";
-        Banner(BannerLevel.Ok, pending + "控制端已就绪。点『打开控制界面』，在设备页选『局域网直连』并填被控端 IP:端口。");
+        Banner(BannerLevel.Ok, pending + "主控端已就绪。点本页的『打开控制界面』，在设备页选『局域网直连』并填被控端 IP:端口。");
     }
 
     public void LaunchClient()

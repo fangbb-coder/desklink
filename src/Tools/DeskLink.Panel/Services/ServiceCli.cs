@@ -91,6 +91,10 @@ public static class ServiceCli
         {
             if (!string.IsNullOrWhiteSpace(root)) { args.Add("--file-scope"); args.Add(root); }
         }
+
+        // 0 = 主显示器 = Service 的默认行为，不传；>0 才显式给 --monitor。
+        // 这是"多显示器没有 UI 入口"的修法：以前面板拼不出这个参数。
+        if (s.MonitorIndex > 0) { args.Add("--monitor"); args.Add(s.MonitorIndex.ToString()); }
         return args;
     }
 

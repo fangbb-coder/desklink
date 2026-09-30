@@ -177,7 +177,20 @@ public sealed class DevicesViewModel : ObservableObject
         private set => SetProperty(ref _statusMessage, value);
     }
 
-    /// <summary>被控端是否启用了局域网直连（未启用时入口禁用）。</summary>
+    /// <summary>
+    /// **刻意不暴露"直连是否可用"的布尔量**（2026-09-29 修正）。
+    ///
+    /// 原来的 <c>DirectEnabled = status.DirectEnabled</c> 是个陷阱：
+    /// <c>StatusResult.DirectEnabled</c> 取自 <c>FirewallHelper.QueryEnabled(port)</c>，
+    /// 含义是"**本机防火墙有没有放行该端口**"，不是"能不能直连"。
+    ///
+    /// 于是控制端被自己的闸门挡住：控制端只负责**拨出**（DirectDialer 无条件注册，
+    /// 不需要入站规则、不需要监听），它的防火墙通常是关的，
+    /// <c>DirectEnabled</c> 恒为 false → 点击"连接"直接被拒，用户只会看到"没反应"。
+    ///
+    /// 正确做法：直连可用性由"Service 是否在跑 + 拨号是否成功"自然表达，
+    /// 不在这里猜。详见 <see cref="ConnectLanAsync"/>。
+    /// </summary>
     public bool DirectEnabled
     {
         get => _directEnabled;
@@ -347,12 +360,10 @@ public sealed class DevicesViewModel : ObservableObject
     /// </summary>
     private async Task<ConnectOutcome> ConnectLanAsync(DeviceItem device, CancellationToken ct)
     {
-        if (!DirectEnabled)
-        {
-            StatusMessage = "本机未启用局域网直连（被控端需 --enable-direct 或在 Settings 放行端口）";
-            return ConnectOutcome.LanNotEnabled;
-        }
-
+        // 不要再用 DirectEnabled 当闸门：它的真实含义是"本机防火墙是否放行该端口"
+        // （取自 StatusResult.DirectEnabled → FirewallHelper.QueryEnabled），而控制端
+        // 只拨出不监听、也不该开入站规则，用它卡住会把控制端整个堵死。
+        // 直连可用性交给拨号本身回答：拨不通就是拨不通，错误会如实显示出来。
         if (!DirectEndpoint.TryParse(LanEndpointText, out var endpoint, out var error))
         {
             StatusMessage = error;

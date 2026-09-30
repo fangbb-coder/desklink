@@ -102,6 +102,22 @@ internal sealed class FakeServiceApi : IServiceApi
         return Task.FromResult(NextSetConfigResult);
     }
 
+    /// <summary>file_progress 桩。测试可塞进度条目验证进度条不再撒谎。</summary>
+    public List<FileProgressEntryDto> FileProgressEntries { get; } = new();
+
+    public bool FileProgressThrows { get; set; }
+
+    /// <summary>GetFileProgressAsync 被调用的次数（验证轮询确实在跑 / 传输结束后确实停了）。</summary>
+    public int GetFileProgressCallCount { get; private set; }
+
+    public Task<FileProgressResult> GetFileProgressAsync(CancellationToken ct = default)
+    {
+        GetFileProgressCallCount++;
+        FailIfUnavailable();
+        if (FileProgressThrows) throw new InvalidOperationException("管道断了");
+        return Task.FromResult(new FileProgressResult { Transfers = FileProgressEntries });
+    }
+
     public Task<StartAgentResult> StartAgentAsync(bool inject, bool noInject, string? pipeOverride, CancellationToken ct = default)
     {
         FailIfUnavailable();
@@ -150,7 +166,25 @@ internal sealed class FakeServiceApi : IServiceApi
         FailIfUnavailable();
         UploadPolicies.Add(policy);
         Uploads.Add((local, remote));
-        return Task.FromResult(TransferResult);
+        return Gate(TransferResult);
+    }
+
+    /// <summary>
+    /// 非空时，传输调用会挂起直到 <see cref="ReleaseTransfer"/> 被调用。
+    /// 用来模拟"传输还在进行中"这段窗口，好让与它并行的进度轮询真的跑起来。
+    /// </summary>
+    public TaskCompletionSource? TransferGate { get; set; }
+
+    public void ReleaseTransfer() => TransferGate?.TrySetResult();
+
+    private async Task<FileTransferResultDto> Gate(FileTransferResultDto result)
+    {
+        if (TransferGate is not null)
+        {
+            try { await TransferGate.Task.WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false); }
+            catch (TimeoutException) { /* 超时也要往下走，别把测试挂死在这里 */ }
+        }
+        return result;
     }
 
     public Task<FileTransferResultDto> DownloadFileAsync(string remote, string local, string policy, CancellationToken ct = default)
@@ -158,7 +192,7 @@ internal sealed class FakeServiceApi : IServiceApi
         FailIfUnavailable();
         DownloadPolicies.Add(policy);
         Downloads.Add((remote, local));
-        return Task.FromResult(TransferResult);
+        return Gate(TransferResult);
     }
 }
 

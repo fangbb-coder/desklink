@@ -11,12 +11,13 @@
         </Grid.RowDefinitions>
 
         <!-- 配对 -->
-        <GroupBox Grid.Row="0" Header="配对（在被控端获取一次性配对码）">
+        <GroupBox Grid.Row="0" Header="配对（两台机器都要各配一次；这里填的是**对方的**公钥）">
             <StackPanel Orientation="Horizontal" Margin="4">
-                <TextBlock Text="配对码" VerticalAlignment="Center" />
-                <TextBox Width="160" Margin="6,0" Text="{Binding PairingCode, UpdateSourceTrigger=PropertyChanged}" />
+                <TextBlock Text="对方公钥" VerticalAlignment="Center" />
+                <TextBox Width="230" Margin="6,0" FontFamily="Consolas" FontSize="11"
+                         Text="{Binding PairingCode, UpdateSourceTrigger=PropertyChanged}" />
                 <TextBlock Text="备注" VerticalAlignment="Center" />
-                <TextBox Width="140" Margin="6,0" Text="{Binding PairingLabel, UpdateSourceTrigger=PropertyChanged}" />
+                <TextBox Width="120" Margin="6,0" Text="{Binding PairingLabel, UpdateSourceTrigger=PropertyChanged}" />
                 <Button Content="配对" Width="72" Command="{Binding PairCommand}" />
             </StackPanel>
         </GroupBox>
@@ -61,7 +62,17 @@
             </ListBox>
         </GroupBox>
 
-        <TextBlock Grid.Row="3" Margin="4,8" TextWrapping="Wrap" Text="{Binding StatusMessage}" Foreground="DarkSlateBlue" />
+        <!--
+          状态条放在设备列表**正下方**并加深边框/加重字体：
+          连接失败的所有原因都写在这里（Service 没起、没配对、防火墙、SIGMA 失败…），
+          以前它是一行灰色小字贴在页面最底下，用户点完"连接"看不到任何变化，
+          只会以为"没反应"。可见性本身就是功能。
+        -->
+        <Border Grid.Row="3" Margin="4,8" Padding="8,6" CornerRadius="4"
+                BorderBrush="#93C5FD" BorderThickness="1" Background="#EFF6FF">
+            <TextBlock TextWrapping="Wrap" Text="{Binding StatusMessage}"
+                       FontSize="12" FontWeight="SemiBold" Foreground="#1D4ED8" />
+        </Border>
 
         <TextBlock Grid.Row="4" Margin="4" TextWrapping="Wrap" Foreground="Gray" FontSize="11"
                    Text="中继连接首次会弹出对端指纹确认（TOFU）；局域网直连复用已配对公钥，不弹指纹。" />

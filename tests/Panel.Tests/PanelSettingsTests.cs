@@ -133,4 +133,44 @@ public class PanelSettingsTests
         c.FileScopeRoots.Add(@"E:\B");
         Assert.Single(s.FileScopeRoots);
     }
+
+    [Fact]
+    public void Clone带得走显示器索引()
+    {
+        var s = new PanelSettings { MonitorIndex = 3 };
+        Assert.Equal(3, s.Clone().MonitorIndex);
+    }
+
+    [Fact]
+    public void 显示器索引默认是0即主显示器()
+    {
+        Assert.Equal(0, new PanelSettings().MonitorIndex);
+    }
+
+    [Fact]
+    public void 显示器索引能落盘并读回()
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "dl-panel-" + Guid.NewGuid().ToString("N")[..8] + ".json");
+        try
+        {
+            var s = new PanelSettings { MonitorIndex = 2 };
+            Assert.True(s.Save(path));
+            Assert.Equal(2, PanelSettings.Load(path).MonitorIndex);
+        }
+        finally
+        {
+            try { if (System.IO.File.Exists(path)) System.IO.File.Delete(path); } catch (System.IO.IOException) { }
+        }
+    }
+
+    [Fact]
+    public void 切角色不动显示器索引()
+    {
+        // 一键准备只该改直连/代理两个开关。多屏用户设好的索引不该被"一键准备"抹掉。
+        var s = new PanelSettings { MonitorIndex = 2 };
+        s.ApplyRoleDefaults(PanelRole.Controller);
+        Assert.Equal(2, s.MonitorIndex);
+        s.ApplyRoleDefaults(PanelRole.Controlled);
+        Assert.Equal(2, s.MonitorIndex);
+    }
 }

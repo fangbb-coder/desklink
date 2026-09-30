@@ -63,8 +63,7 @@ public sealed class DirectHandshakeFixture : IAsyncDisposable
 
     private DirectHandshakeFixture(string serverDir, string clientDir)
     {
-        // 随机端口避免测试并行/串行时的 TIME_WAIT 冲突
-        DirectPort = 47000 + Random.Shared.Next(1000);
+        DirectPort = PickFreePort();
         ServerDataDir = serverDir;
         ClientDataDir = clientDir;
 
@@ -109,6 +108,28 @@ public sealed class DirectHandshakeFixture : IAsyncDisposable
         // 等监听就绪
         await WaitForPortAsync(fixture.DirectPort);
         return fixture;
+    }
+
+    /// <summary>
+    /// 向操作系统要一个当前空闲的端口。
+    ///
+    /// 以前是 <c>47000 + Random.Next(1000)</c>——只有 1000 个槽位，而这个程序集有 40 多个用例，
+    /// 每个用例各建一个 fixture，xUnit 还会并行跑测试类。槽位这么小，撞端口是必然事件：
+    /// 实测 <c>Tcp_DeviceIdExchange_Succeeds</c> 约 1/4 的概率挂在
+    /// SocketException「每个地址或端口只能使用一次」上，而且换一台机器、换个时刻就换一批用例中招。
+    /// 让内核分配临时端口（bind port 0 再读回）之后，碰撞概率从"必然"降到"极小"。
+    /// </summary>
+    private static int PickFreePort()
+    {
+        for (int attempt = 0; attempt < 20; attempt++)
+        {
+            var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+            probe.Start();
+            var port = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
+            probe.Stop();
+            if (port > 0) return port;
+        }
+        throw new InvalidOperationException("连试 20 次都没拿到空闲端口，测试环境有问题。");
     }
 
     /// <summary>启动一个"未配对"服务端（用于测试拒绝场景）。</summary>

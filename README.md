@@ -62,16 +62,33 @@ pwsh -NoProfile -File tests/e2e-smoke.ps1 -Mode all -Transport both
 ```
 
 当前测试规模（`dotnet test DeskLink.sln`，全部真实断言、无 `Assert.True(true)` 占位）：
-Protocol 71 / Service 176 / Client 123 / DirectHandshake 41 / Agent 137 / Panel 78 = **626 通过**。
+Protocol 71 / Service 200 / Client 137 / DirectHandshake 41 / Agent 137 / Panel 112 = **698 通过**。
 
 > 2026-09-29 修复轮新增 46 个用例（见 [KnownIssues.md](./KnownIssues.md) 1.7 节：
 > 直连 UI 假接线 / 无条件"已连接" / 中继地址"已保存"但不生效）。
 >
-> 同日新增 `DeskLink.Panel`（本机服务图形控制面板）与 78 个配套用例。
+> 同日新增 `DeskLink.Panel`（本机服务图形控制面板）与 95 个配套用例。
 >
 > 再修一处 WPF 绑定回归：`SettingsView` 把 `ActiveRelayUrl`（private setter）绑到
 > `Run.Text`（默认 TwoWay）导致**客户端每次启动即崩**。`WpfSmokeTests` 现在会真正
 > `Show()` 并渲染窗口 + 收集数据绑定错误，这类 bug 以后会被测试拦下。
+>
+> 2026-09-30 面板改成双角色选项卡后，给 `Panel` 也补了同样的渲染冒烟 + 静态护栏。
+> 其中一条结论值得记住：**绑到一个不存在的属性，WPF 在 Release 下静默失败，
+> `PresentationTraceSources.DataBindingSource` 一个字都不吐**（实测）。
+> 所以属性名对不对只能静态扫 XAML 校验，光挂 trace 监听器是抓不到的。
+>
+> 同日三个次要缺陷的修复（详见 [KnownIssues.md](./KnownIssues.md) 1.8 节）：
+> 文件传输不再是假进度条（新增 `file_progress` 只读 RPC，客户端轮询真实分块字节，
+> **拿不到就明说拿不到**）；面板补上多显示器入口（`--monitor`）；`--file-scope`
+> 与显示器索引落盘到 `<data-dir>\service.json` 跨重启保留，命令行仍永远优先。
+> 审文案时还挖出一个流程断点：主控端页让用户"到被控端页粘对方的公钥"，
+> 而被控端页当时**根本没有那个输入框**、一键准备也从不配对——已补上。
+>
+> 另修一处测试基建抖动：`DirectHandshakeFixture` 原来用
+> `47000 + Random.Next(1000)` 取端口，只有 1000 个槽位却要喂 40+ 个并行用例，
+> 撞端口是必然（实测约 1/4 概率挂在「每个地址或端口只能使用一次」）。改成向内核
+> 要临时端口后连跑 8 次全过。
 
 ### 图形化：DeskLink 控制面板
 
@@ -85,9 +102,21 @@ Protocol 71 / Service 176 / Client 123 / DirectHandshake 41 / Agent 137 / Panel 
 | 启停本机服务 | `DeskLink.Service.exe --console --data-dir <dir> --enable-direct --inject-agent` |
 | 查看会话数 / 中继 / 端到端状态 | `get_status` RPC |
 
-**被控端**：打开面板 → 点「我是被控端」→ 把面板给出的**公钥**和**本机地址**发给控制端。
-**控制端**：打开面板 → 点「我是控制端」→ 粘贴对方公钥 → 点「打开控制界面」，
+面板是**两个角色选项卡**布局（不是"点一下切换"的单页）：
+
+| 选项卡 | 这一页上有什么 |
+|---|---|
+| **我是主控端**（左边那一页） | ① 一键准备主控端 ② 把本机公钥交给被控端 ③ 粘贴被控端公钥并配对 ④ **打开控制界面**（WPF 客户端） |
+| **我是被控端** | ① 一键准备被控端 ② 把本机公钥与 `IP:端口` 交给主控端 ③ 放行入站端口 |
+| 选项卡之外（共用） | 本机服务启停与状态、高级设置、服务日志 |
+
+因此**控制端的所有功能都在「我是主控端」这一页下**，被控端的专属项（放行入站端口）只在
+「我是被控端」页，两边不会串味。切选项卡只是换视图，不会顺手改掉
+`--enable-direct` / `--inject-agent` ——那属于「一键准备」的动作。
+
+**主控端**：打开面板 → 「我是主控端」页 → 一键准备 → 粘贴被控端公钥配对 → 点「打开控制界面」，
 在设备页选「局域网直连」并填被控端 `IP:端口`。
+**被控端**：打开面板 → 「我是被控端」页 → 一键准备（自动放行防火墙）→ 把**公钥**和**本机地址**发给主控端。
 
 面板与 WPF 客户端职责不重叠：**面板管本机服务，客户端管远程操控**。
 

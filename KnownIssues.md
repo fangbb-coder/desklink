@@ -178,6 +178,105 @@
 `DeskLink.Media.*` / `DeskLink.AgentMedia.*`（后两者是给桌面代理与媒体通道的）。
 写脚本连本机 Service 时容易只写 `DeskLink.{instance}`，表现为连接超时。
 
+### 1.8 2026-09-30 修复轮：三个次要缺陷 + 一次文案审查挖出的流程断点
+
+> 前一轮修的是"UI 撒谎"（1.7），这一轮修的是**更朴素的三件事**，外加一次文案审查
+> 意外挖出的功能断点。共同的教训是：**界面上的每句说明都应当能被代码兑现。**
+
+#### ① 文件传输是假进度条
+
+**症状**：传输列表里的进度条从头到尾停在 0%，等大调用返回后"啪"一下跳到 100%。
+
+**根因**：`FilesViewModel` 把 `Progress` 初始化成 0，只在**长调用返回时**置 100。
+它从不查询真实分块进度。
+
+**值得记的一件事**：Service 侧的 `FileTransferEngine` **早就有** `FileTransferProgress` /
+`OnProgress` / `Snapshot()`，只是**从来没经 RPC 暴露过**。所以这不是"缺一个进度系统"，
+而是"已有的东西没接出来"。找到这一点之后修法就只是加一个只读查询。
+
+**修复**：
+- `PipeContract` 增加 `FileProgressEntryDto` / `FileProgressResult`。
+- `IServiceCore.GetFileProgress()` → `PipeServer` 派发 `file_progress` →
+  `IServiceApi.GetFileProgressAsync`。
+- `FilesViewModel` 在等长调用**期间并行轮询**（250ms），按「方向 + 归一化路径」
+  匹配（上传=sending、下载=receiving），传输结束立刻取消，不留孤儿轮询。
+- `FilesView` 进度条右侧补上真实数字（`12.1 MB / 48.0 MB（25.2%）`）。
+
+**核心约定：拿不到就明说拿不到。** 轮询失败、Service 太老、没有会话——
+这些情况下 `ProgressKnown=false`，进度条走**不确定态**，文字显示"未获取到分块进度"，
+**绝不停在 0% 装作在传**。这正是原缺陷被投诉的地方。测试里
+`Service报不出来进度_转不确定态而不是假装0` 锁死这条。
+
+> 写测试时发现的一个真实缺陷：传输成功后 `ProgressKnown` 仍是 false，
+> 于是"已完成"的条目挂着"未获取到分块进度"。传完了就是全部传完，这是确知的真值。
+> 已加 `item.ProgressKnown = true`。
+
+#### ② 多显示器没有任何 UI 入口
+
+**症状**：`--monitor <n>` 这个参数一直存在于 `DeskLink.DesktopAgent`，但**面板拼不出它**，
+多屏用户只能去命令行手改。
+
+**修复**：`CommandLineParser` 增 `--monitor`（校验 `>= 0`，进 `--help`）；
+`PanelSettings.MonitorIndex` 落盘；`MainViewModel.MonitorIndex` + `ServiceCli.BuildRunArgs`
+在 `> 0` 时透传。`0` 不传（= 主显示器 = Service 默认行为）。
+`--monitor` 需要重启 Service 才生效，界面上直接写明了这一点。
+
+#### ③ `--file-scope` 不持久化
+
+**症状**：直接跑 `DeskLink.Service.exe --file-scope D:\share` 的人，下次不带这个参数
+重启，授权目录就静默变成"一律拒绝"——文件功能无声失效，只看得到"传输被拒绝"。
+
+**修复**：
+- 新增 `ServiceConfig`，落盘到 `<data-dir>\service.json`（snake_case）。
+- `CommandLineParser` 改**两遍扫描**：先廉价取出 `--data-dir`，读出本文件，再做完整解析。
+  这解决的是"配置在 data-dir 里、而 data-dir 本身由命令行决定"的鸡生蛋问题。
+- **命令行永远优先于落盘值**——落盘只是默认值。
+- 坏掉的 `service.json` 返回 null 而不是抛异常：**绝不让一个坏配置阻止 Service 启动**。
+- `SetConfig` 也能就地改这两项（`file_scope_roots` / `capture_monitor_index`）并落盘，
+  结果字段 `persisted` 如实回报"到底存没存住"。
+- 顺手让 `get_config` 也返回这两项，客户端不再只能看不能改。
+
+> **为什么不把中继地址/直连端口也塞进这个文件**：它们各有"立即生效 vs 需重启"的
+> 语义，由 `ServiceCore.SetConfig` 就地处理（见 1.7 ③）。混进来会让
+> "哪些是持久化配置"变得说不清。
+
+#### ④ 文案审查挖出的流程断点（不属于三个缺陷，是审文案时发现的）
+
+主控端页第 2 步写着：
+
+> 对方拿到这串后，要在他那边的『我是被控端』页粘进『对方的公钥』输入框再点配对
+
+而**被控端页当时根本没有这个输入框**——整页只有"一键准备"、复制公钥与地址、放行端口。
+更糟的是 `PrepareControlledAsync` **从不配对**。
+
+于是：直连握手是双向 SIGMA，两边都得认对方（见 1.7 的"运维陷阱"），
+被控端不配 = 永远连不上，而用户完全按界面指引操作、无从发现问题。
+
+**修复**：被控端页补上「对方的公钥（主控端发给你的）」输入框 + 配对按钮，
+与主控端页**共用同一个 `PeerPub`**（在一页填了、切到另一页可见）。
+`PrepareControlledAsync` 也改成有公钥就顺手配对；**配对排在提权之前**——
+`PeerPub` 只在内存里不落盘，提权重启（`runas`）会把这个框清空。
+收尾横幅里"还没配对"会被顶到最前面。
+
+**同一轮修掉的其他文案问题**：
+- 术语混用：主控端页第 4 步写"控制端才需要这一步"，全文其余都是"主控端"。
+- **"QUIC 可用：…"是写死的字面量**，`MainViewModel.QuicAvailable` 明明存在却没绑——
+  本机根本不支持 QUIC 时界面也在说可用。又一处"UI 撒谎"。改成 `QuicText`，
+  两个分支都把话说满（不可用时明说只能走 TCP-TLS）。
+- 提权提示两处说法矛盾（"弹出提权提示" vs "提权重启"），统一成实际行为：
+  弹 UAC → 以管理员身份重新打开面板 → 自动放行。
+
+#### 本轮顺带修的测试基建抖动
+
+`DirectHandshakeFixture` 原来用 `47000 + Random.Shared.Next(1000)` 取端口。
+**1000 个槽位要喂 40 多个用例**，而且 xUnit 会并行跑测试类，撞端口是必然事件——
+实测 `Tcp_DeviceIdExchange_Succeeds` 约 **1/4** 的概率挂在
+`SocketException: 每个地址或端口只能使用一次` 上。改成向内核要临时端口
+（`TcpListener` bind port 0 再读回）后连跑 8 次全过。
+
+> 教训：这种"换台机器就换一批用例中招"的失败，**不能归到"偶发"就放过**。
+> 重复跑隔离用例是最快的定性手段——如果是真抖动，隔离跑会稳定复现。
+
 ## 2. P7 桌面代理 —— 未在本机验证的 6 项
 
 以下能力**代码已实现且编译通过、部分逻辑有单测覆盖**，但没有在真实桌面场景下跑过。

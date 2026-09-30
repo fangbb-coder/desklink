@@ -75,6 +75,48 @@ public class ServiceCliTests
         Assert.DoesNotContain("--relay-url", ServiceCli.BuildRunArgs(s));
     }
 
+    // —— 缺陷②「多显示器没有 UI 入口」——
+    // 以前面板压根拼不出 --monitor，多屏用户只能上命令行。现在：0 不传（= Service 默认的主显示器），
+    // >0 显式传，且索引必须紧跟在 flag 后面。
+
+    [Fact]
+    public void RunArgs_默认不产出monitorFlag()
+    {
+        var s = Basic();
+        s.MonitorIndex = 0;
+        Assert.DoesNotContain("--monitor", ServiceCli.BuildRunArgs(s));
+    }
+
+    [Fact]
+    public void RunArgs_负数索引不产出monitorFlag()
+    {
+        var s = Basic();
+        s.MonitorIndex = -1;
+        Assert.DoesNotContain("--monitor", ServiceCli.BuildRunArgs(s));
+    }
+
+    [Fact]
+    public void RunArgs_非零索引成对出现()
+    {
+        var s = Basic();
+        s.MonitorIndex = 2;
+        var args = ServiceCli.BuildRunArgs(s).ToList();
+        var i = args.IndexOf("--monitor");
+        Assert.True(i >= 0, "非零显示器索引必须透传给 Service");
+        Assert.Equal("2", args[i + 1]);
+    }
+
+    [Fact]
+    public void RunArgs_多屏设置不被fileScope挤掉()
+    {
+        var s = Basic();
+        s.FileScopeRoots = new List<string> { @"D:\A", @"E:\B" };
+        s.MonitorIndex = 1;
+        var args = ServiceCli.BuildRunArgs(s).ToList();
+        Assert.Equal(2, args.Count(a => a == "--file-scope"));
+        Assert.Equal(1, args.Count(a => a == "--monitor"));
+    }
+
     [Fact]
     public void RunArgs_有relayUrl时成对出现()
     {

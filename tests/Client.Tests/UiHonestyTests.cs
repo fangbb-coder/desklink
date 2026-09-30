@@ -38,8 +38,6 @@ public class LanDialWiringTests
         vm.SelectedDevice = NewDevice();
         vm.PathMode = ConnectPathMode.Lan;
         vm.LanEndpointText = "192.168.1.20:47200";
-        // 直连要求本机已启用（由防火墙/参数决定）。
-        await vm.RefreshAsync();
         api.StatusResult.DirectEnabled = true;
         await vm.RefreshAsync();
 
@@ -54,6 +52,53 @@ public class LanDialWiringTests
         Assert.Equal("192.168.1.20", call.Host);
         Assert.Equal(47200, call.Port);
         Assert.Equal(1, approved);
+    }
+
+    [Fact]
+    public async Task 控制端未放行入站端口时仍能拨号()
+    {
+        // 回归用例（2026-09-29 真机踩到）：ConnectLanAsync 曾经拿 DirectEnabled 当闸门，
+        // 而 DirectEnabled 取自 StatusResult.DirectEnabled = FirewallHelper.QueryEnabled(port)
+        // ——那是"**本机防火墙有没有放行该端口**"，不是"能不能直连"。
+        // 控制端只负责拨出（DirectDialer 无条件注册，不需要入站规则），
+        // 它的防火墙通常是关的 → DirectEnabled 恒 false → 点"连接"直接被拒，
+        // 用户只看到"没反应"。这条用例锁死"闸门必须移除"这个决定。
+        var api = new FakeServiceApi();
+        var vm = NewDevices(api);
+        vm.SelectedDevice = NewDevice();
+        vm.PathMode = ConnectPathMode.Lan;
+        vm.LanEndpointText = "192.168.1.20:47200";
+
+        // 模拟控制端典型状态：本机没放行入站端口
+        api.StatusResult.DirectEnabled = false;
+        await vm.RefreshAsync();
+        Assert.False(vm.DirectEnabled);
+
+        api.NextDialResult = new DirectDialResultDto { Ok = true, Transport = "tcp-tls" };
+        var approved = 0;
+        vm.LanConnectApproved += (_, _) => approved++;
+
+        var outcome = await vm.ConnectSelectedAsync();
+
+        Assert.Equal(ConnectOutcome.Approved, outcome);
+        Assert.Single(api.DialCalls);   // 真的拨出去了
+        Assert.Equal(1, approved);
+    }
+
+    [Fact]
+    public async Task 地址格式非法时给出明确提示而不是静默返回()
+    {
+        var api = new FakeServiceApi();
+        var vm = NewDevices(api);
+        vm.SelectedDevice = NewDevice();
+        vm.PathMode = ConnectPathMode.Lan;
+        vm.LanEndpointText = "这不是地址";
+
+        var outcome = await vm.ConnectSelectedAsync();
+
+        Assert.Equal(ConnectOutcome.InvalidLanEndpoint, outcome);
+        Assert.Empty(api.DialCalls);
+        Assert.False(string.IsNullOrWhiteSpace(vm.StatusMessage));
     }
 
     [Fact]
@@ -103,8 +148,14 @@ public class LanDialWiringTests
     }
 
     [Fact]
-    public async Task ConnectLan_When_Direct_Disabled_Dials_Nothing()
+    public async Task ConnectLan_When_Direct_Not_Opened_Still_Dials_And_Surfaces_Failure()
     {
+        // 这条用例原本断言"DirectEnabled=false 就不拨号"（ConnectOutcome.LanNotEnabled）——
+        // 那正是 2026-09-29 真机踩到的 bug：DirectEnabled 的真实含义是
+        // "本机防火墙有没有放行该端口"，而控制端只拨出、不需要入站规则，
+        // 于是控制端被自己的闸门整个堵死，点"连接"毫无反应。
+        //
+        // 现在语义是：闸门移除，**拨号照发**，失败由拨号结果如实回报。
         var api = new FakeServiceApi();
         var vm = NewDevices(api);
         vm.SelectedDevice = NewDevice();
@@ -113,10 +164,14 @@ public class LanDialWiringTests
         api.StatusResult.DirectEnabled = false;
         await vm.RefreshAsync();
 
+        api.NextDialResult = new DirectDialResultDto { Ok = false, Detail = "对端无响应" };
+
         var outcome = await vm.ConnectSelectedAsync();
 
-        Assert.Equal(ConnectOutcome.LanNotEnabled, outcome);
-        Assert.Empty(api.DialCalls);
+        Assert.Equal(ConnectOutcome.DialFailed, outcome);
+        // 关键区别：不再是"什么都不做"，而是真去拨、把失败原因显示出来
+        Assert.Single(api.DialCalls);
+        Assert.Contains("对端无响应", vm.StatusMessage);
     }
 }
 

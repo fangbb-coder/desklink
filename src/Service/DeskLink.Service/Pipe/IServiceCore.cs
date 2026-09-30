@@ -18,7 +18,20 @@ public interface IServiceCore
     void Pair(ReadOnlySpan<byte> peerPub, string label);
     void Unpair(ReadOnlySpan<byte> peerPub);
     GetConfigResult GetConfig();
-    SetConfigResult SetConfig(string? relayUrl, int? directPort);
+
+    /// <summary>
+    /// 改运行时配置。四个参数都可为 null（= 不改这一项）。
+    ///
+    /// <paramref name="fileScopeRoots"/> 与 <paramref name="monitorIndex"/> 会
+    /// **落盘**到 &lt;data-dir&gt;\service.json 并在下次启动时被
+    /// <see cref="DeskLink.Service.Configuration.CommandLineParser"/> 读回来（命令行仍优先）。
+    /// 其余项的生效方式见各实现处的说明。
+    /// </summary>
+    SetConfigResult SetConfig(
+        string? relayUrl,
+        int? directPort,
+        IReadOnlyList<string>? fileScopeRoots = null,
+        int? monitorIndex = null);
     StartAgentResult StartAgent(bool inject, bool noInject, string? pipeOverride, string? mediaPipe = null);
     void StopAgent();
 
@@ -41,4 +54,13 @@ public interface IServiceCore
     Task<FileListResultDto> ListRemoteFilesAsync(string path, CancellationToken ct = default);
     Task<FileTransferResultDto> UploadFileAsync(string local, string remote, string policy, CancellationToken ct = default);
     Task<FileTransferResultDto> DownloadFileAsync(string remote, string local, string policy, CancellationToken ct = default);
+
+    /// <summary>
+    /// 本机全部在途传输的实时进度（引擎的 <c>Snapshot()</c>）。
+    ///
+    /// 存在的唯一理由：<c>file_upload</c>/<c>file_download</c> 是长调用，客户端在等它返回期间
+    /// 拿不到任何中间信息。没有本方法，界面上的进度条只能画 0% → 100% 的假进度。
+    /// 没有会话时返回空列表（不是错误——"没进度"是常态）。
+    /// </summary>
+    FileProgressResult GetFileProgress();
 }
