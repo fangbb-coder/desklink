@@ -211,6 +211,7 @@ desklink/
    ├─ Protocol.Tests/                     # xunit 协议库单测（含 C#↔Go 黄金向量对齐）
    ├─ Service.Tests/                      # xunit Service 单测 + P5 双实例 E2E
    └─ e2e-smoke.ps1                       # 端到端冒烟（真 registryd + relayd）
+   └─ gen-testcase.ps1                    # 跑全量单测并重新生成 testcase.md
 ```
 
 ## 开发环境
@@ -233,6 +234,18 @@ dotnet test tests/Protocol.Tests/Protocol.Tests.csproj
 cd src/vps
 go test ./internal/proto/...
 ```
+
+**全量单测 + 重新生成用例清单**：
+
+```powershell
+# 跑一遍全部 6 个测试项目，并把「每个用例 + 结果」导出成 testcase.md
+pwsh -NoProfile -File tests/gen-testcase.ps1
+```
+
+[testcase.md](./testcase.md) 是**生成物**，不是手写的：跑一次就重新生成一次，
+避免手写清单和实际跑的东西对不上（对不上的清单比没有更糟——它会让人以为
+某些功能"有测试覆盖"）。里面除逐条结果外，还记了本轮新增用例对应的缺陷、
+以及变异测试（把每处修复单独回退，确认对应用例确实变红）的结果。
 
 ## 安装与卸载
 
