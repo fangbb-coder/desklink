@@ -23,24 +23,76 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private readonly IServiceHost _host;
     private readonly PanelSettings _settings;
     private bool _disposed;
+    private readonly string? _settingsPath;
 
-    public MainViewModel(IServiceHost host, PanelSettings settings)
+    /// <param name="settingsPath">
+    /// 落盘路径。生产传 null（用 %APPDATA%\DeskLink\panel.json）；
+    /// 测试必须传一个临时文件——<see cref="StartServiceAsync"/>、两个「一键准备」和
+    /// 防火墙开关都会在内部无参调 <see cref="SaveSettings"/>，不隔离的话
+    /// 跑一次单测就把开发者自己的面板配置冲掉了。
+    /// </param>
+    public MainViewModel(IServiceHost host, PanelSettings settings, string? settingsPath = null)
     {
         _host = host;
         _settings = settings;
+        _settingsPath = settingsPath;
 
         _host.Log += OnHostLog;
         _host.ServiceExited += OnServiceExited;
 
-        StartServiceCommand = new RelayCommand(() => _ = StartServiceAsync(), () => CanStart);
-        StopServiceCommand = new RelayCommand(() => _ = StopServiceAsync(), () => CanStop);
-        RefreshIdentityCommand = new RelayCommand(() => _ = RefreshIdentityAsync(), () => !IsBusy);
-        PairCommand = new RelayCommand(() => _ = PairAsync(), () => !IsBusy && HasPeerPub);
-        OpenFirewallCommand = new RelayCommand(() => _ = ToggleFirewallAsync(), () => !IsBusy);
-        PrepareControlledCommand = new RelayCommand(() => _ = PrepareControlledAsync(), () => !IsBusy);
-        PrepareControllerCommand = new RelayCommand(() => _ = PrepareControllerAsync(), () => !IsBusy);
+        // 全部命令都走 RunCommand：统一做异常兜底。
+        // 以前是 XAML 绑 Click 时由 MainWindow.RunGuarded 兜，绑 Command 之后那条路就没了，
+        // 不下沉的话异常会变成没人观察的 Task 异常，面板表面上"点了没反应"。
+        StartServiceCommand = new RelayCommand(() => _ = RunCommand(StartServiceAsync), () => CanStart);
+        StopServiceCommand = new RelayCommand(() => _ = RunCommand(StopServiceAsync), () => CanStop);
+        RefreshIdentityCommand = new RelayCommand(() => _ = RunCommand(RefreshIdentityAsync), () => !IsBusy);
+        PairCommand = new RelayCommand(() => _ = RunCommand(PairAsync), () => !IsBusy && HasPeerPub);
+        OpenFirewallCommand = new RelayCommand(() => _ = RunCommand(ToggleFirewallAsync), () => !IsBusy);
+        PrepareControlledCommand = new RelayCommand(() => _ = RunCommand(PrepareControlledAsync), () => !IsBusy);
+        PrepareControllerCommand = new RelayCommand(() => _ = RunCommand(PrepareControllerAsync), () => !IsBusy);
         LaunchClientCommand = new RelayCommand(LaunchClient, () => _host.ClientExePath is not null);
         SaveSettingsCommand = new RelayCommand(() => SaveSettings());
+    }
+
+    /// <summary>命令执行期间抛出、且方法内部没接住的异常。View 订阅它来弹窗。</summary>
+    public event Action<Exception>? CommandFailed;
+
+    /// <summary>
+    /// 提权重启已发起 → 本进程该退位了。View 注入"关掉自己"的实现。
+    /// 走 <see cref="RunCommand"/> 的收尾而不是在事件里直接关：那样会在命令
+    /// 还停在 await 上时就关窗，命令的 finally（IsBusy 复位等）会落到已释放的对象上。
+    /// </summary>
+    public Action? ElevationRetire { get; set; }
+
+    private bool _elevationPending;
+
+    private async Task RunCommand(Func<Task> action)
+    {
+        try
+        {
+            await action().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            // 顺手也播进横幅：弹窗可能被用户忽略掉，横幅是留在界面上的那份。
+            Banner(BannerLevel.Error, $"操作失败：{ex.Message}");
+            OnHostLog(ex.ToString());
+            CommandFailed?.Invoke(ex);
+        }
+        finally
+        {
+            if (_elevationPending)
+            {
+                _elevationPending = false;
+                ElevationRetire?.Invoke();
+            }
+        }
+    }
+
+    private void RequestElevation()
+    {
+        _elevationPending = true;
+        ElevationRequested?.Invoke();
     }
 
     // ── 对外状态 ────────────────────────────────────────────────────────────
@@ -153,14 +205,19 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private int _monitorIndex;
     /// <summary>
     /// 捕获哪块显示器（0 = 主显示器）。**只有被控端需要**：主控端不产生画面。
-    /// 负数在 <see cref="SaveSettings"/> 里被夹回 0，不会让 Service 拿到非法 <c>--monitor</c>。
+    ///
+    /// 负数在这里就夹回 0，而不是留给 <see cref="SaveSettings"/>：
+    /// 夹在保存阶段的话，输入框里会一直显示 -5，旁边那句说明却写"第 1 块屏幕"，
+    /// 同一屏上两处自相矛盾，而且 -5 是能成功转成 int 的、连红框都不会有——
+    /// 典型的静默撒谎。夹在 setter 里，输入框立刻回显 0，两边永远一致。
     /// </summary>
     public int MonitorIndex
     {
         get => _monitorIndex;
         set
         {
-            if (SetField(ref _monitorIndex, value)) OnPropertyChanged(nameof(MonitorIndexText));
+            var clamped = value < 0 ? 0 : value;
+            if (SetField(ref _monitorIndex, clamped)) OnPropertyChanged(nameof(MonitorIndexText));
         }
     }
 
@@ -259,13 +316,22 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         await RefreshStatusAsync().ConfigureAwait(true);
         await RefreshFirewallAsync().ConfigureAwait(true);
 
-        // 不要用"就绪"覆盖上面的失败：读不到公钥 / 查不到防火墙时，
+        // 不要用引导语覆盖上面的失败：读不到公钥 / 查不到防火墙时，
         // 那条错误才是用户该先看到的东西。BannerLevel 仍是 Info 说明前面没出过问题。
+        //
+        // 引导语必须跟着**真实状态**说话。RefreshStatusAsync 刚刚把服务状态查出来了：
+        // 服务没运行时写"就绪"是撒谎，而且原句"被控端就绪。在本页点『一键准备被控端』"
+        // 本身也自相矛盾——既说好了又让用户去启动。实测截图里服务明明显示"未运行"，
+        // 横幅却是一片绿的"被控端就绪"。
         if (BannerLevel == BannerLevel.Info)
         {
-            Banner(BannerLevel.Info, _isController
-                ? "主控端就绪。在本页粘贴被控端的公钥完成配对，然后点『打开控制界面』。"
-                : "被控端就绪。在本页点『一键准备被控端』，然后把公钥和地址发给主控端。");
+            Banner(BannerLevel.Info, ServiceRunning
+                ? _isController
+                    ? "本机服务已在运行。在本页粘贴被控端的公钥完成配对，然后点『打开控制界面』。"
+                    : "本机服务已在运行。把本页的【公钥】和【本机地址】发给主控端即可。"
+                : _isController
+                    ? "本机服务未运行。点『一键准备主控端』一步做完，或先单独点『启动服务』。"
+                    : "本机服务未运行。点『一键准备被控端』一步做完，或先单独点『启动服务』。");
         }
     }
 
@@ -298,7 +364,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _settings.RelayUrl = string.IsNullOrWhiteSpace(RelayUrl) ? null : RelayUrl.Trim();
         _settings.Role = Role;
 
-        var ok = _settings.Save(path);
+        // path 为 null 时回落到构造时注入的路径：生产是 %APPDATA%，测试是各自的临时文件。
+        // 以前这里直接 _settings.Save(null)，而 StartServiceAsync / 两个「一键准备」 /
+        // 防火墙开关都会无参调本方法 —— 等于跑一次单测就改掉开发者自己的面板配置。
+        var ok = _settings.Save(path ?? _settingsPath);
         if (ok) Banner(BannerLevel.Ok, "设置已保存。");
         else Banner(BannerLevel.Warn, "设置保存失败（可能 %APPDATA% 不可写），本次运行仍按界面上的值执行。");
         return ok;
@@ -365,23 +434,32 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         if (!Begin("正在查询防火墙…")) return;
         try
         {
-            Firewall = await _host.GetFirewallStatusAsync().ConfigureAwait(true);
-            if (Firewall is null)
-                Banner(BannerLevel.Warn, "读不到防火墙状态（Service 不可用？）。");
+            await QueryFirewallAsync().ConfigureAwait(true);
+            if (Firewall is null) Banner(BannerLevel.Warn, "读不到防火墙状态（Service 不可用？）。");
         }
         finally { End(); }
     }
 
+    /// <summary>
+    /// 只查状态，不碰 IsBusy、不播报横幅。
+    /// 切换防火墙后已经在 busy 了，这时候再调 RefreshFirewallAsync 会被它自己的
+    /// Begin() 挡在门外——那样 Firewall 永远不刷新，开关就成了"只进不退"的一次性动作。
+    /// </summary>
+    private async Task QueryFirewallAsync()
+        => Firewall = await _host.GetFirewallStatusAsync().ConfigureAwait(true);
+
     /// <summary>切开放行/关闭。需要管理员时会触发提权重启。</summary>
     public async Task ToggleFirewallAsync()
     {
+        // 读不到状态时按"没开"处理，也就是这次点下去是放行。
+        // 读不到状态本身是横幅要说的事，但不该让用户按了没反应。
         var wantEnable = Firewall?.FullyOpen != true;
 
         if (!_host.IsAdministrator)
         {
             SaveSettings();
             Banner(BannerLevel.Warn, "放行入站端口需要管理员权限，正在以管理员身份重新打开面板…");
-            if (_host.TryRestartElevated()) ElevationRequested?.Invoke();
+            if (_host.TryRestartElevated()) RequestElevation();
             else Banner(BannerLevel.Error, "提权被拒绝。请右键面板图标 →『以管理员身份运行』后再点一次。");
             return;
         }
@@ -394,7 +472,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 r.Ok
                     ? (wantEnable ? $"已放行 {_settings.DirectPort} 入站。" : $"已关闭 {_settings.DirectPort} 入站。")
                     : $"操作失败（退出码 {r.ExitCode}）：{FirstLine(r.Combined)}");
-            await RefreshFirewallAsync().ConfigureAwait(true);
+            // 刷新失败也不能盖掉上面那条结果：切换成没成，和读没读到状态，是两回事。
+            try { await QueryFirewallAsync().ConfigureAwait(true); }
+            catch (Exception ex) { OnHostLog("刷新防火墙状态失败：" + ex.Message); }
         }
         finally { End(); }
     }
@@ -451,6 +531,15 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         PairingCount = st.PairingCount;
     }
 
+    /// <summary>
+    /// 三态配对结果：null=没填公钥，false=填了但没配上，true=配对成功。
+    /// 二态不够用——"没填"和"填错了"要告诉用户的话完全不同，
+    /// 混成一句"还没配对"会让人反复检查自己早就填对的输入框。
+    /// 横幅由 <see cref="TryPairAsync"/> 播，这里只回报事实。
+    /// </summary>
+    private async Task<bool?> TryPairTriStateAsync()
+        => string.IsNullOrWhiteSpace(PeerPub) ? null : await TryPairAsync().ConfigureAwait(true);
+
     /// <summary>被控端一键准备：开直连 + 注入代理 + 放行防火墙 + 起服务。</summary>
     public async Task PrepareControlledAsync()
     {
@@ -460,23 +549,27 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         InjectAgent = _settings.InjectAgent;
         SaveSettings();
 
+        // 共享目录的默认值必须一路带到最后的收尾提示里。
+        // 以前是在这里单独播一条 Info，可后面 ToggleFirewallAsync / StartServiceAsync
+        // 各自都会 SaveSettings() 播一次"设置已保存"，末尾的"已就绪"再盖一次——
+        // 这条信息必定被覆盖三次，用户从头到尾看不到自己被授权了哪个目录。
+        string? autoShare = null;
         if (string.IsNullOrWhiteSpace(FileScopeText))
         {
-            var share = Path.Combine(DataDir, "Share");
-            FileScopeText = share;
-            Banner(BannerLevel.Info, $"共享目录默认为 {share}，可在下方改。远程只能读写这个目录。");
+            autoShare = Path.Combine(DataDir, "Share");
+            FileScopeText = autoShare;
         }
 
         // 先配对、再提权。
         // 顺序有讲究：PeerPub 存在内存里、不落盘，提权重启会把这个框清空；
         // 而配对走的是 --pair-peer-pub 一次性子命令，本来就不需要管理员权限。
-        var paired = !string.IsNullOrWhiteSpace(PeerPub) && await TryPairAsync().ConfigureAwait(true);
+        var paired = await TryPairTriStateAsync().ConfigureAwait(true);
 
         if (!_host.IsAdministrator)
         {
             SaveSettings();
             Banner(BannerLevel.Warn, "放行入站端口需要管理员权限，正在以管理员身份重新打开面板…");
-            if (_host.TryRestartElevated()) { ElevationRequested?.Invoke(); return; }
+            if (_host.TryRestartElevated()) { RequestElevation(); return; }
             Banner(BannerLevel.Error, "提权被拒绝。可先点『启动服务』跳过这一步，但主控端可能连不上。");
         }
 
@@ -485,11 +578,17 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
         await StartServiceAsync().ConfigureAwait(true);
 
-        // 配没配上是此刻唯一还没定的事，必须留在最显眼的位置说清楚。
-        var pending = paired
-            ? ""
-            : "【还没配对】把主控端的公钥粘进本页的『对方的公钥』输入框，点『配对』。\n";
-        Banner(BannerLevel.Ok, pending + "被控端已就绪。把本页的【公钥】和【本机地址】发给主控端即可。");
+        // 配没配上是此刻唯一还没定的事，必须留在最显眼的位置说清楚，
+        // 而且不能被上面 StartServiceAsync 的"服务已启动"盖掉。
+        var pending = paired switch
+        {
+            true => "",
+            false => "【配对没成功】上面写的是真实失败原因（公钥可能贴错、或对方服务没起），修好后再点一次本页的『配对』。\n",
+            _ => "【还没配对】把主控端的公钥粘进本页的『对方的公钥』输入框，点『配对』。\n",
+        };
+        Banner(BannerLevel.Ok, pending
+            + "被控端已就绪。把本页的【公钥】和【本机地址】发给主控端即可。"
+            + (autoShare is null ? "" : $"\n共享目录已设为 {autoShare}，远程只能读写这个目录。"));
     }
 
     /// <summary>主控端一键准备：关掉用不上的开关 + 起服务（+ 有公钥就顺手配对）。</summary>
@@ -501,20 +600,19 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         InjectAgent = _settings.InjectAgent;
         SaveSettings();
 
-        if (string.IsNullOrWhiteSpace(PeerPub))
-        {
-            Banner(BannerLevel.Warn, "还没填被控端的公钥。拿到后粘进本页的『被控端公钥』输入框，再点一次『一键准备主控端』即可完成配对。");
-        }
-        else
-        {
-            await PairAsync().ConfigureAwait(true);
-        }
+        // 必须接住结果：下面 StartServiceAsync 的"服务已启动"和末尾的"已就绪"
+        // 都会盖掉 TryPairAsync 播的横幅，唯一的去处就是这里把它并进收尾提示。
+        var paired = await TryPairTriStateAsync().ConfigureAwait(true);
 
         await StartServiceAsync().ConfigureAwait(true);
-        // 别把上面那条"还没填公钥"覆盖掉——它才是主控端用户此刻唯一未完成的事。
-        var pending = string.IsNullOrWhiteSpace(PeerPub)
-            ? "【还没配对】把被控端的公钥填进本页的输入框再点一次本按钮。\n"
-            : "";
+
+        // "还没配好"才是主控端用户此刻唯一未完成的事，必须压过绿色的"已就绪"。
+        var pending = paired switch
+        {
+            true => "",
+            false => "【配对没成功】上面写的是真实失败原因（公钥可能贴错、或被控端服务没起），改好后再点一次本页的『配对』。\n",
+            _ => "【还没配对】把被控端的公钥填进本页的『被控端公钥』输入框，再点一次本按钮。\n",
+        };
         Banner(BannerLevel.Ok, pending + "主控端已就绪。点本页的『打开控制界面』，在设备页选『局域网直连』并填被控端 IP:端口。");
     }
 

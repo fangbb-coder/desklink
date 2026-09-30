@@ -164,7 +164,7 @@
                 <TextBlock Style="{StaticResource Lead}"
                            Text="把『开启局域网直连』和『注入桌面代理』都关掉，再启动本机服务；已经填了对方公钥的话会顺手完成配对。主控端只往外拨、不接受别人拨进来，所以不需要放行入站端口，也不需要注入桌面代理。" />
                 <Button Content="一键准备主控端" Style="{StaticResource PrimaryButton}" HorizontalAlignment="Left"
-                        Click="OnPrepareControllerClick" />
+                        Command="{Binding PrepareControllerCommand}" />
               </StackPanel>
             </Border>
 
@@ -246,7 +246,7 @@
                 <TextBlock Style="{StaticResource Lead}"
                            Text="放行入站端口 + 开启局域网直连 + 注入桌面代理 + 启动本机服务，一步做完。注入代理意味着你的屏幕和键鼠会被主控端接管，请只对信任的人用。" />
                 <Button Content="一键准备被控端" Style="{StaticResource PrimaryButton}" HorizontalAlignment="Left"
-                        Click="OnPrepareControlledClick" />
+                        Command="{Binding PrepareControlledCommand}" />
               </StackPanel>
             </Border>
 

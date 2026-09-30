@@ -76,20 +76,30 @@ public class ServiceCliTests
     }
 
     // —— 缺陷②「多显示器没有 UI 入口」——
-    // 以前面板压根拼不出 --monitor，多屏用户只能上命令行。现在：0 不传（= Service 默认的主显示器），
-    // >0 显式传，且索引必须紧跟在 flag 后面。
+    // 以前面板压根拼不出 --monitor，多屏用户只能上命令行。
+    // 现在**总是**显式传（0 也传），且索引必须紧跟在 flag 后面。
+    //
+    // 曾经是"0 不传、>0 才传"，看着更省事，实际制造了一个静默的错位：
+    // 用户在界面上把 2 号屏改回主显示器 → 面板不传 --monitor → Service 回落到
+    // service.json 里存的 2 → 界面写着 0，实际捕获的却是 2 号屏。
+    // 界面上能改的值，必须能被传出去，否则就是在撒谎。
 
     [Fact]
-    public void RunArgs_默认不产出monitorFlag()
+    public void RunArgs_索引为0也照样产出monitorFlag()
     {
         var s = Basic();
         s.MonitorIndex = 0;
-        Assert.DoesNotContain("--monitor", ServiceCli.BuildRunArgs(s));
+        var args = ServiceCli.BuildRunArgs(s).ToList();
+        var i = args.IndexOf("--monitor");
+        Assert.True(i >= 0, "0 是有意义的取值（主显示器），必须显式传出去才能盖掉落盘值");
+        Assert.Equal("0", args[i + 1]);
     }
 
     [Fact]
     public void RunArgs_负数索引不产出monitorFlag()
     {
+        // 负数不是合法取值，SaveSettings 会先夹成 0；这里只保证 BuildRunArgs 自己
+        // 不会把一个非法值递给 Service（parser 那边也会拒，但双保险更省事）。
         var s = Basic();
         s.MonitorIndex = -1;
         Assert.DoesNotContain("--monitor", ServiceCli.BuildRunArgs(s));

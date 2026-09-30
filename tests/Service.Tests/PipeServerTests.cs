@@ -70,6 +70,11 @@ internal sealed class StubServiceCore : IServiceCore
     public IReadOnlyList<string>? LastSetFileScopeRoots;
     public int? LastSetMonitorIndex;
     public bool LastSetOk = true;
+    public bool LastSetChanged = true;
+    // Persisted 必须能独立于 Ok 编排：一次保存可以"执行成功但没落盘"，
+    // 而这正是客户端必须说出来的那条路径。共用一个开关的话，
+    // 落盘失败的报文永远构造不出来，测试就成了恒过的假绿。
+    public bool LastSetPersisted = true;
 
     public SetConfigResult SetConfig(
         string? relayUrl,
@@ -81,7 +86,13 @@ internal sealed class StubServiceCore : IServiceCore
         LastSetDirectPort = directPort;
         LastSetFileScopeRoots = fileScopeRoots;
         LastSetMonitorIndex = monitorIndex;
-        return new SetConfigResult { Ok = LastSetOk, FirewallRepaired = false, Persisted = LastSetOk };
+        return new SetConfigResult
+        {
+            Ok = LastSetOk,
+            Changed = LastSetChanged,
+            FirewallRepaired = false,
+            Persisted = LastSetPersisted,
+        };
     }
 
     // file_progress 桩：默认报"没有在途传输"，测试需要时自己塞。
@@ -214,11 +225,35 @@ public class PipeServerTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task SetConfig_回报是否真的落盘了()
+    public async Task SetConfig_落盘成功时如实回报persisted为真()
     {
-        _core.LastSetOk = true;
+        _core.LastSetPersisted = true;
         var ok = await SendAsync(_clientPipe, "set_config", new { capture_monitor_index = 1 });
         Assert.True(ok.RootElement.GetProperty("result").GetProperty("persisted").GetBoolean());
+    }
+
+    [Fact]
+    public async Task SetConfig_落盘失败必须回报false_不能让客户端以为以后记住了()
+    {
+        // 目录不可写时：本次运行按新值跑，但下次启动会退回旧值。
+        // 管道层若把 false 吞成 true，客户端就会弹一句"已保存"——
+        // 用户以为记住了，其实配置已经蒸发。
+        _core.LastSetPersisted = false;
+        var ok = await SendAsync(_clientPipe, "set_config", new { capture_monitor_index = 1 });
+        Assert.False(ok.RootElement.GetProperty("result").GetProperty("persisted").GetBoolean());
+    }
+
+    [Fact]
+    public async Task SetConfig_ok表达的是执行成功_不是值有没有变()
+    {
+        // 存一个和当前一模一样的值也是成功的。以前 ok 跟着 changed 走，
+        // 客户端会把"同值保存"当失败弹红条，用户越点越困惑。
+        _core.LastSetOk = true;
+        _core.LastSetChanged = false;
+        var ok = await SendAsync(_clientPipe, "set_config", new { capture_monitor_index = 1 });
+        var result = ok.RootElement.GetProperty("result");
+        Assert.True(result.GetProperty("ok").GetBoolean());
+        Assert.False(result.GetProperty("changed").GetBoolean());
     }
 
     [Fact]

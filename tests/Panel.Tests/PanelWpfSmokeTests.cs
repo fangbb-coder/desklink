@@ -188,6 +188,61 @@ public class PanelWpfSmokeTests
     // ── 静态护栏（不需要 STA 线程，任何环境都能跑的第一道网）──────────────
 
     [Fact]
+    public void Xaml_两个一键准备按钮必须绑Command_不能绑Click()
+    {
+        // 这两个 Command 的 CanExecute 是 `!IsBusy`，本来就是为了防重入。
+        // 绑 Click 等于把这个保护整个绕开：连点两次，第二次照样重跑流程，
+        // 照样弹一句"已就绪"，而服务根本没起来。
+        var xaml = StripXmlComments(File.ReadAllText(LocatePanelXaml()));
+
+        AssertPrepareButtonUsesCommand(xaml, "一键准备主控端", "PrepareControllerCommand");
+        AssertPrepareButtonUsesCommand(xaml, "一键准备被控端", "PrepareControlledCommand");
+    }
+
+    private static void AssertPrepareButtonUsesCommand(string xaml, string content, string command)
+    {
+        var at = xaml.IndexOf($"Content=\"{content}\"", StringComparison.Ordinal);
+        Assert.True(at >= 0, $"XAML 里找不到按钮「{content}」");
+
+        // 就近往后 300 字符内必须出现 Command="{Binding <command>}"，且不能出现 Click=
+        var window = xaml.Substring(at, Math.Min(300, xaml.Length - at));
+        Assert.Contains($"Command=\"{{Binding {command}}}\"", window);
+        Assert.DoesNotContain("Click=", window);
+    }
+
+    [Fact]
+    public void OnClosing_必须先问再拆_不能让用户点否之后变僵尸()
+    {
+        // 拆排在确认之前的后果：用户点「否」→ e.Cancel 掉了窗口，
+        // 可定时器已经 Stop、事件已经摘 → 状态永远不刷新、日志不再滚动，
+        // 而且没有任何地方会把它们装回去。窗口还在，但已经不会动了。
+        var src = File.ReadAllText(LocatePanelSource("MainWindow.xaml.cs"));
+        var start = src.IndexOf("OnClosing", StringComparison.Ordinal);
+        Assert.True(start >= 0, "找不到 OnClosing");
+
+        var body = src[start..];
+        var stopAt = body.IndexOf("_statusTimer?.Stop()", StringComparison.Ordinal);
+        var cancelAt = body.IndexOf("e.Cancel = true", StringComparison.Ordinal);
+        var unsubAt = body.IndexOf("CollectionChanged -= OnLogChanged", StringComparison.Ordinal);
+
+        Assert.True(stopAt >= 0, "OnClosing 里应有 _statusTimer?.Stop()");
+        Assert.True(cancelAt >= 0, "OnClosing 里应有 e.Cancel = true");
+        Assert.True(unsubAt >= 0, "OnClosing 里应有摘事件");
+        Assert.True(stopAt > cancelAt, "Stop 定时器必须排在 e.Cancel = true 之后");
+        Assert.True(unsubAt > cancelAt, "摘事件必须排在 e.Cancel = true 之后");
+    }
+
+    [Fact]
+    public void ViewModel_命令异常必须有人接_不能变成没人观察的Task异常()
+    {
+        // 改绑 Command 之后，MainWindow 那边就没有 RunGuarded 可兜底了。
+        // 兜底随之下沉到 ViewModel，这里盯着它还在。
+        var src = File.ReadAllText(LocatePanelSource("ViewModels\\MainViewModel.cs"));
+        Assert.Contains("CommandFailed", src);
+        Assert.Contains("catch (Exception ex)", src);
+    }
+
+    [Fact]
     public void Xaml_每个绑定的目标属性都必须真实存在()
     {
         // 这条是**实测换来的**：渲染时挂 PresentationTraceSources.DataBindingSource 监听器
@@ -420,6 +475,17 @@ public class PanelWpfSmokeTests
             if (File.Exists(candidate)) return candidate;
         }
         throw new FileNotFoundException("找不到 src\\Tools\\DeskLink.Panel\\MainWindow.xaml，静态护栏无法运行。");
+    }
+
+    private static string LocatePanelSource(string fileName)
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        for (int depth = 0; depth < 8 && dir is not null; depth++, dir = dir.Parent)
+        {
+            var candidate = Path.Combine(dir.FullName, "src", "Tools", "DeskLink.Panel", fileName);
+            if (File.Exists(candidate)) return candidate;
+        }
+        throw new FileNotFoundException($"找不到 src\\Tools\\DeskLink.Panel\\{fileName}，静态护栏无法运行。");
     }
 
     private static TabControl? FindTabControl(DependencyObject root) =>

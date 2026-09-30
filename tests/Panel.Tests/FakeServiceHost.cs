@@ -54,6 +54,11 @@ public sealed class FakeServiceHost : IServiceHost
     {
         FirewallSetCalled = true;
         FirewallSetEnable = enable;
+        // 真实世界里 Set-NetFirewallRule 改完规则，紧接着的状态查询就会读出新值。
+        // 替身必须跟着变，否则"切换 → 刷新 → 拿新状态决定下次方向"这条链路永远测不到，
+        // ViewModel 里刷新被吞掉也照样全绿。
+        if (FirewallSetResult.ExitCode == 0 && FirewallResult is { } f)
+            FirewallResult = f with { TcpRulePresent = enable, UdpRulePresent = enable };
         return Task.FromResult(FirewallSetResult);
     }
     public Task StartServiceAsync(CancellationToken ct = default)

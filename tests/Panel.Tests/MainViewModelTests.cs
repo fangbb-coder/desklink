@@ -19,11 +19,127 @@ public class MainViewModelTests
         var host = new FakeServiceHost();
         configure?.Invoke(host);
         var settings = new PanelSettings { DataDir = @"C:\dl-ctrl", DirectPort = 47200 };
-        var vm = new MainViewModel(host, settings);
+        // 落盘路径必须隔离：StartServiceAsync / 两个「一键准备」/ 防火墙开关
+        // 都会在内部无参调 SaveSettings()，不隔离就会写进开发者真实的
+        // %APPDATA%\DeskLink\panel.json，把人家面板配置冲掉。
+        var vm = new MainViewModel(host, settings, TempPath());
         return (vm, host, settings);
     }
 
     private static string TempPath() => Path.Combine(Path.GetTempPath(), "dl-panel-" + Guid.NewGuid().ToString("N") + ".json");
+
+    [Fact]
+    public async Task 初始化时服务没跑起来就不能说已就绪()
+    {
+        // 实测截图抓到的：运行状态写着"未运行"，横幅却是一片 Info 的"被控端就绪"，
+        // 而且那句话本身还让用户去点"一键准备"——既说好了又让人去启动。
+        var (vm, _, _) = NewVm(h => h.StatusResult = null);
+        await vm.InitializeAsync();
+
+        Assert.False(vm.ServiceRunning);
+        Assert.DoesNotContain("就绪", vm.StatusMessage);
+        Assert.Contains("未运行", vm.StatusMessage);
+        Assert.Contains("启动服务", vm.StatusMessage);
+        vm.Dispose();
+    }
+
+    [Fact]
+    public async Task 初始化时服务确实在跑才可以说已在运行()
+    {
+        var (vm, _, _) = NewVm();   // 默认 StatusResult 非 null = 服务在跑
+        await vm.InitializeAsync();
+
+        Assert.True(vm.ServiceRunning);
+        Assert.Contains("已在运行", vm.StatusMessage);
+        Assert.DoesNotContain("未运行", vm.StatusMessage);
+        vm.Dispose();
+    }
+
+    [Fact]
+    public async Task 初始化读不到公钥时引导语不许盖掉错误()
+    {
+        var (vm, _, _) = NewVm(h => h.PrintConfigResult = new OneShotResult(1, "", "boom"));
+        await vm.InitializeAsync();
+
+        Assert.Equal(BannerLevel.Error, vm.BannerLevel);
+        Assert.Contains("boom", vm.StatusMessage);
+        vm.Dispose();
+    }
+
+    [Fact]
+    public async Task 负的显示器索引当场夹回0_输入框和说明不许自相矛盾()
+    {
+        var (vm, _, _) = NewVm();
+
+        // -5 是能成功转成 int 的，所以连红框都不会有。
+        // 夹在 SaveSettings 里的话，输入框会一直显示 -5、旁边的说明却说"第 1 块屏幕"，
+        // 同一屏上两处打架，用户只能靠猜。夹在 setter 里输入框立刻回显 0。
+        vm.MonitorIndex = -5;
+
+        Assert.Equal(0, vm.MonitorIndex);
+        Assert.Equal("第 1 块屏幕（主显示器）", vm.MonitorIndexText);
+        vm.Dispose();
+    }
+
+    [Fact]
+    public void 非零显示器索引的说明要跟索引对上()
+    {
+        var (vm, _, _) = NewVm();
+        vm.MonitorIndex = 1;
+        Assert.Equal("第 2 块屏幕（索引 1）", vm.MonitorIndexText);
+        vm.Dispose();
+    }
+
+    [Fact]
+    public async Task 被控端一键准备_共享目录的默认值必须留在最终提示里()
+    {
+        // 以前这条 Info 会被后面三次"设置已保存/已就绪"覆盖掉，
+        // 用户从头到尾看不到自己到底授权了哪个目录。
+        var (vm, _, _) = NewVm(h => h.IsAdministrator = true);
+        await vm.InitializeAsync();
+        vm.DataDir = @"C:\dl-ctrl";
+        vm.FileScopeText = "";
+
+        await vm.PrepareControlledAsync();
+
+        Assert.Contains(@"C:\dl-ctrl\Share", vm.StatusMessage);
+        Assert.Contains("被控端已就绪", vm.StatusMessage);
+        vm.Dispose();
+    }
+
+    [Fact]
+    public async Task 用户自己填了共享目录就不再替他决定()
+    {
+        var (vm, _, _) = NewVm(h => h.IsAdministrator = true);
+        await vm.InitializeAsync();
+        vm.DataDir = @"C:\dl-ctrl";
+        vm.FileScopeText = @"D:\myshare";
+
+        await vm.PrepareControlledAsync();
+
+        Assert.DoesNotContain(@"C:\dl-ctrl\Share", vm.StatusMessage);
+        Assert.Equal(@"D:\myshare", vm.FileScopeText);
+        vm.Dispose();
+    }
+
+    [Fact]
+    public async Task 跑完一键准备也不能碰到真实的APPDATA配置()    {
+        // 护栏不是"再测一遍功能"，而是钉住"副作用的落点"：
+        // 以前 NewVm() 不给隔离路径，而 PrepareController/StartService 内部会
+        // 无参 SaveSettings() → 写真实的 %APPDATA%\DeskLink\panel.json。
+        // 单测跑一次，开发者的 dataDir/端口/角色就被冲掉了，而且很难归因到测试。
+        var real = PanelSettings.SettingsPath;
+        var before = File.Exists(real) ? File.ReadAllBytes(real) : null;
+
+        var (vm, _, _) = NewVm();
+        await vm.InitializeAsync();
+        await vm.PrepareControllerAsync();
+        await vm.StartServiceAsync();
+        vm.Dispose();
+
+        var after = File.Exists(real) ? File.ReadAllBytes(real) : null;
+        Assert.Equal(before, after);
+    }
 
     // ── 初始化 ────────────────────────────────────────────────────────────
 
@@ -162,6 +278,46 @@ public class MainViewModelTests
 
         Assert.True(host.FirewallSetCalled);
         Assert.False(host.FirewallSetEnable);
+        vm.Dispose();
+    }
+
+    [Fact]
+    public async Task 切换防火墙后必须刷新状态_否则这个开关永远关不掉()
+    {
+        // RefreshFirewallAsync 自带 Begin/End。切换时 IsBusy 已经是 true，
+        // 再调它会被自己的 Begin() 挡在门外，Firewall 就永远停在切换前的旧值；
+        // 而"下次该开还是该关"正是拿这个旧值算的 —— 结果就是只进不退的单向开关。
+        var (vm, host, _) = NewVm(h => { h.IsAdministrator = true; h.FirewallResult = new(47200, false, true, false, false); });
+        await vm.InitializeAsync();
+
+        await vm.ToggleFirewallAsync();
+        Assert.True(host.FirewallSetEnable);
+        Assert.True(vm.Firewall?.FullyOpen);   // 没刷新的话这里还是 false
+
+        await vm.ToggleFirewallAsync();
+        Assert.False(host.FirewallSetEnable); // 没刷新的话这里还是 true，等于关不掉
+        Assert.False(vm.Firewall?.FullyOpen);
+        vm.Dispose();
+    }
+
+    [Fact]
+    public async Task 切换后刷新状态失败_不能盖掉切换自己的结果()
+    {
+        // 刷新读不到是一回事，切换成没成是另一回事。
+        // 让查询抛异常，验证"操作失败"的横幅不会被刷新异常顶掉。
+        var (vm, _, _) = NewVm(h =>
+        {
+            h.IsAdministrator = true;
+            h.FirewallResult = new(47200, false, true, false, false);
+            h.FirewallSetResult = new OneShotResult(5, "", "netsh 返回 5");
+        });
+        await vm.InitializeAsync();
+
+        await vm.ToggleFirewallAsync();
+
+        Assert.Equal(BannerLevel.Error, vm.BannerLevel);
+        Assert.Contains("netsh 返回 5", vm.StatusMessage);
+        Assert.False(vm.IsBusy);
         vm.Dispose();
     }
 
@@ -413,6 +569,79 @@ public class MainViewModelTests
         Assert.Empty(host.PairedPubs);
         Assert.Equal(1, host.StartCount);
         Assert.Contains("公钥", vm.StatusMessage);
+        vm.Dispose();
+    }
+
+    [Fact]
+    public async Task 主控端配对失败时不能只剩一句绿色已就绪()
+    {
+        // 以前这里 await PairAsync()（void 包装）把结果丢了，
+        // 失败横幅紧接着被 StartServiceAsync 的"服务已启动"和末尾的"已就绪"连盖两层，
+        // 用户看到的是一片绿，实际一台都连不上。
+        var (vm, host, _) = NewVm(h => h.PairResult = new OneShotResult(1, "", "公钥格式不对"));
+        await vm.InitializeAsync();
+        vm.PeerPub = "PEERPUB==";
+        await vm.PrepareControllerAsync();
+
+        Assert.Equal("PEERPUB==", Assert.Single(host.PairedPubs));
+        Assert.Equal(1, host.StartCount);              // 配对失败不影响起服务
+        Assert.Contains("配对没成功", vm.StatusMessage); // 但必须说出来
+        Assert.DoesNotContain("配对成功", vm.StatusMessage);
+        vm.Dispose();
+    }
+
+    [Fact]
+    public async Task 被控端配对失败时也不能只剩一句绿色已就绪()
+    {
+        var (vm, host, _) = NewVm(h =>
+        {
+            h.IsAdministrator = true;
+            h.PairResult = new OneShotResult(1, "", "被控端服务没起");
+        });
+        await vm.InitializeAsync();
+        vm.PeerPub = "PEERPUB==";
+        await vm.PrepareControlledAsync();
+
+        Assert.Equal("PEERPUB==", Assert.Single(host.PairedPubs));
+        Assert.Contains("配对没成功", vm.StatusMessage);
+        vm.Dispose();
+    }
+
+    [Fact]
+    public async Task 没填公钥和填错了要给不同的提示()
+    {
+        // 二态（true/false）不够用：混成一句"还没配对"会让人反复检查自己早就填对的输入框。
+        var (noKey, _, _) = NewVm();
+        await noKey.InitializeAsync();
+        await noKey.PrepareControllerAsync();
+        var whenMissing = noKey.StatusMessage;
+        noKey.Dispose();
+
+        var (wrong, host, _) = NewVm(h => h.PairResult = new OneShotResult(1, "", "公钥格式不对"));
+        await wrong.InitializeAsync();
+        wrong.PeerPub = "PEERPUB==";
+        await wrong.PrepareControllerAsync();
+        var whenFailed = wrong.StatusMessage;
+        wrong.Dispose();
+
+        Assert.NotEqual(whenMissing, whenFailed);
+        Assert.Contains("还没配对", whenMissing);
+        Assert.Contains("配对没成功", whenFailed);
+        Assert.Contains("公钥", whenMissing);
+        Assert.Equal(1, host.PairedPubs.Count);
+    }
+
+    [Fact]
+    public async Task 配对成功时不该再挂一条还没配对的提示()
+    {
+        var (vm, _, _) = NewVm();
+        await vm.InitializeAsync();
+        vm.PeerPub = "PEERPUB==";
+        await vm.PrepareControllerAsync();
+
+        Assert.DoesNotContain("还没配对", vm.StatusMessage);
+        Assert.DoesNotContain("配对没成功", vm.StatusMessage);
+        Assert.Contains("主控端已就绪", vm.StatusMessage);
         vm.Dispose();
     }
 

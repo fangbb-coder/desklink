@@ -2,7 +2,7 @@
 
 > 本文是**诚实清单**：明确区分「已验证」「未验证」「已知不支持」。
 > 未验证项不代表功能不存在，而是**没有在本机/本环境跑过**，需要真机人工确认。
-> 最后更新：2026-09-27。
+> 最后更新：2026-10-01。
 
 ---
 
@@ -276,6 +276,113 @@
 
 > 教训：这种"换台机器就换一批用例中招"的失败，**不能归到"偶发"就放过**。
 > 重复跑隔离用例是最快的定性手段——如果是真抖动，隔离跑会稳定复现。
+
+## 1.9 2026-10-01 复审轮：两份独立审查报告的核实与修复
+
+两份报告（Panel 侧 / Service 侧）合计报出 20+ 条。**逐条核实后修掉 12 个**，
+其中 8 个是确定的用户可见缺陷，4 个是测试自身的假绿与非 hermetic。
+下面只记录"核实过、确认成立"的部分——没通过的放最后。
+
+### 8.1 面板：防火墙开关是单向的（只放行，关不掉）
+
+`ToggleFirewallAsync` 成功后调 `RefreshFirewallAsync()` 刷新状态，但后者
+**自带 `Begin/End`**：切换时 `IsBusy` 已经是 `true`，内层 `Begin` 直接 return false，
+整个方法体一行都不执行。于是 `Firewall` 永远停在切换前的旧值——而
+"这次该放行还是该关闭"正是 `Firewall?.FullyOpen != true` 拿这个旧值算的。
+结果：点一次放行，再点还是放行，永远关不掉。
+
+**为什么测试当时是绿的**：`FakeServiceHost.FirewallResult` 是写死的预设值，
+不跟随 `SetFirewallAsync` 变化，所以"切换→刷新→拿新状态"这条链路根本没被走到。
+替身先改成像真实系统那样跟着切换走，这条路径才暴露出来。
+
+### 8.2 面板：配对失败被两层横幅盖成一片绿
+
+`PrepareControllerAsync` 原来 `await PairAsync()`——`PairAsync` 是
+`async Task` 的 void 包装，返回值直接丢掉。配对失败时 `TryPairAsync` 播的红色横幅，
+紧接着被 `StartServiceAsync` 的"服务已启动"和末尾的"已就绪"连盖两层。
+用户看到的是"主控端已就绪"，实际一台都连不上。
+
+顺带发现二态不够用：`没填公钥` 和 `填了但公钥不对` 给用户的话完全不同，
+混成一句"还没配对"会让人反复检查自己早就填对的输入框。现在是三态。
+
+### 8.3 `set_config` 的 `ok` 混着"值有没有变"
+
+`Ok = changed` 意味着：保存一个和当前一模一样的值回报 `ok=false`，
+客户端（`SettingsViewModel.SaveAsync` 直接 `return result.Ok`）把它当失败弹红条。
+用户点一次被气一次，却什么也没改坏。
+
+现在 `ok` = 执行成功、`changed` = 值变没变，契约里补了明确语义。
+`ServiceCoreDirectDialTests.SetConfig_Same_RelayUrl_Is_Not_A_Change`
+当年断言的就是 `Assert.False(result.Ok)` —— **把缺陷当规范写下来了**，已更正。
+
+### 8.4 落盘失败被渲染成"已保存"
+
+`PipeContract` 早就承诺"UI 必须把 `persisted=false` 说出来"，但两处都没兑现：
+- `SettingsViewModel.BuildSaveMessage` 从不读 `Persisted`；
+- `BuildRestartHint` 见 `!requiresRestart` 就 `return null`，于是"值没变 + 写盘失败"
+  这条最容易被漏掉的路径连提示都构造不出来。
+
+### 8.5 入参校验排在副作用之后
+
+`file_scope_roots` 的副作用（写进 `_options`）在 `monitor_index < 0` 的校验**之前**。
+一次非法调用会留下半套配置，异常又在管道层被吞成 `internal error`——
+用户看到一句没头没尾的报错，内存里的授权目录却已经变了、还没落盘。
+现在所有入参先校验、再动任何状态。
+
+### 8.6 显示器索引复位不回去
+
+`ServiceCli.BuildRunArgs` 原来 `if (s.MonitorIndex > 0)` 才传 `--monitor`。
+用户在界面上把 2 号屏改回主显示器 → 传不出去 → Service 回落读 `service.json` 里的 2
+→ **界面写着 0，实际捕获的是 2 号屏**。`parser` 本来就接受 `--monitor 0`，
+现在总是显式传（负数仍不传，那不是合法取值）。
+
+### 8.7 关闭面板会变成僵尸
+
+`OnClosing` 先 `Stop()` 定时器、摘事件，**然后**才问"确定关闭吗"。
+用户点「否」→ `e.Cancel` 掉了窗口，可定时器已停、事件已摘，
+状态永远不刷新、日志不再滚动，而且没有任何地方会把它们装回去。
+现在先问，确认要关了才拆。
+
+### 8.8 一键准备可重入
+
+两个「一键准备」按钮绑的是 `Click` 而不是 `Command`，
+`PrepareControlledCommand` / `PrepareControllerCommand` 的 `CanExecute => !IsBusy`
+在 XAML 里零引用。改绑 `Command` 之后异常兜底顺带下沉到 ViewModel 的
+`RunCommand`（否则 `_ = XxxAsync()` 的异常会变成没人观察的 Task 异常）。
+提权后退位也改成 `RunCommand` 的收尾——绑在某个按钮的 `finally` 上会漏掉
+"放行入站端口"那条触发路径，留下两个并存的面板实例。
+
+### 8.9 两个单测在改开发者自己的配置
+
+- `MainViewModelTests.NewVm()` 走无参 `SaveSettings()`，而 `StartServiceAsync`、
+  两个「一键准备」、防火墙开关**内部都会无参调它** → 写真实的
+  `%APPDATA%\DeskLink\panel.json`。现在 `MainViewModel` 构造可注入落盘路径。
+- `ServiceConfigPersistenceTests` 两个用例不传 `--data-dir`，实际读的是真实机器的
+  `%ProgramData%\DeskLink\service.json`。装过 Service 的开发机上那个文件是存在的。
+
+> 教训：**测试只能看到测试自己造出来的状态**。碰到"不报错但结果不确定"的用例，
+> 先查它有没有在读真实机器上的东西。
+
+### 8.10 报告里没通过的核实
+
+| 报告说法 | 核实结果 |
+|---|---|
+| `MainViewModelTests.cs:311` 有字节级 UTF-8 截断 | **误报**。用 `UTF8Encoding($false, true)` 严格解码扫了全部 217 个源文件，全部合法 |
+| `Snapshot()` 遍历 `ConcurrentDictionary` 有竞态 | 不成立，遍历期间不修改集合是安全的 |
+| `file_progress` 派发链路字段对不上 | 逐字段核对，一一对应 |
+| 建议把 `monitor_index` 改名 | 自相矛盾：属性名本来就是 `capture_monitor_index` |
+
+### 8.11 顺带修的一处 flaky
+
+`FileTransferTests.E2E_Cancel_SenderStopsAndReceiverDropsPart`：等 `ActiveTransfers > 0`
+就取消，可 5MB 在回环上常常一两拍就传完，于是**取消打在一条已经结束的传输上**——
+传输确实成功了，用例随机红，且与被测代码无关。
+改成等 `Snapshot()` 里出现一条 `State == "sending"` 的传输再取消，并把文件放大到 32MB
+让"进行中"是个能被采样到的状态。
+
+> 教训：flaky 用例本身就是缺陷。它会掩盖真实回归，也会让人习惯性忽略红灯。
+> 定性手段：隔离跑。真抖动隔离跑也稳定复现；隔离跑稳定通过、全量偶发失败，
+> 则是共享状态或时序窗口的问题。
 
 ## 2. P7 桌面代理 —— 未在本机验证的 6 项
 

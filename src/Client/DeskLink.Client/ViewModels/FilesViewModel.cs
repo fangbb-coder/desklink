@@ -469,6 +469,13 @@ public sealed class FilesViewModel : ObservableObject
         {
             progressCts.Cancel();
             await progress.ConfigureAwait(false);   // 不留下"孤儿轮询"继续刷进度
+
+            // 取消只是"请求"：还挂在管道上、没被 observe 到的那次 file_progress 会在
+            // 上面这次 await 之前完成回写，把 ProgressKnown 又改回 false。
+            // 于是"已完成"的条目挂着"未获取到分块进度"——那是在说谎，不是保守。
+            // 轮询到这里已经彻底收尾，传输的终态才是最终事实，重新钉回去。
+            if (item.State == TransferState.Completed) item.ProgressKnown = true;
+
             item.Cts = null;
             Busy = false;
         }

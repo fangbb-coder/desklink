@@ -268,11 +268,22 @@ public sealed class SettingsViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 组装保存后的提示文案：把"立即生效"与"需重启才生效"分开讲。
+    /// 组装保存后的提示文案：把"立即生效"、"需重启才生效"、"没能落盘"三件事分开讲。
     /// 服务端也带了一份 <c>RestartHint</c>，优先用服务端的（本机化更准）。
+    ///
+    /// 契约诚实性（PipeContract 承诺过"UI 必须把落盘失败说出来"）：
+    /// <c>Persisted=false</c> 时**绝不能**只回一句"已保存"——目录不可写的情况下，
+    /// 用户以为以后都记住了，实际下次启动就静默退回旧值。
     /// </summary>
     private static string BuildSaveMessage(SetConfigResult result)
     {
+        // 没落盘是比"要不要重启"更硬的问题：重启提示只在文案后面补充，落盘失败必须打头。
+        if (!result.Persisted)
+        {
+            var lead = "⚠ 未保存到磁盘（目录不可写？）——本次运行按新值执行，下次启动会退回旧值。";
+            return string.IsNullOrWhiteSpace(result.RestartHint) ? lead : $"{lead}\n{result.RestartHint}";
+        }
+
         if (!result.RequiresRestart)
         {
             return result.FirewallRepaired ? "已保存；防火墙规则已同步" : "已保存";

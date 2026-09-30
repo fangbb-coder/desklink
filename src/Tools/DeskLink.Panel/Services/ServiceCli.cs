@@ -92,9 +92,18 @@ public static class ServiceCli
             if (!string.IsNullOrWhiteSpace(root)) { args.Add("--file-scope"); args.Add(root); }
         }
 
-        // 0 = 主显示器 = Service 的默认行为，不传；>0 才显式给 --monitor。
-        // 这是"多显示器没有 UI 入口"的修法：以前面板拼不出这个参数。
-        if (s.MonitorIndex > 0) { args.Add("--monitor"); args.Add(s.MonitorIndex.ToString()); }
+        // 0 也照样传。
+        // 原来是 `> 0` 才传，可那样"从 2 号屏改回主显示器"就传不出去：命令行缺省 →
+        // Service 回落读 service.json 里的 2 → 界面写着 0，实际捕获的却是 2 号屏。
+        // parser 接受 `--monitor 0`，而且只要命令行给了这个参数就不再回落，两边语义是对齐的。
+        //
+        // 负数是唯一不传的情况：它不是合法索引，交给 parser 去报错不如这里直接不产出
+        // （正常流程里 SaveSettings 早就夹成 0 了，走到这里说明是绕过界面的直接调用）。
+        if (s.MonitorIndex >= 0)
+        {
+            args.Add("--monitor");
+            args.Add(s.MonitorIndex.ToString());
+        }
         return args;
     }
 

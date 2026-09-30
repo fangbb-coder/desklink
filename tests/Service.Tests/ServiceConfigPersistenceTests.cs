@@ -152,10 +152,13 @@ public class ServiceConfigPersistenceTests : IDisposable
     }
 
     [Fact]
-    public void dataDir不在命令行里_用默认目录读_不报错()
+    public void 空目录里没有serviceJson_安静按没有默认值处理()
     {
-        // 没有 service.json 的默认目录必须安静地按"没有默认值"处理。
-        var r = CommandLineParser.Parse(Array.Empty<string>());
+        // 以前这两个用例不传 --data-dir，于是落到了**真实机器**的
+        // %ProgramData%\DeskLink\service.json。装过 Service 的开发机上那个文件是存在的，
+        // 测试就会随机红；而且它当时根本没在测"默认值"，测的是"我这台机器碰巧存了什么"。
+        // hermetic 的前提是：测试只能看到测试自己造出来的状态。
+        var r = CommandLineParser.Parse(new[] { "--data-dir", _dir });
         Assert.True(r.Ok);
         Assert.Empty(r.Options!.FileScopeRoots);
         Assert.Equal(0, r.Options.CaptureMonitorIndex);
@@ -166,9 +169,26 @@ public class ServiceConfigPersistenceTests : IDisposable
     [Fact]
     public void monitor默认是0即主显示器()
     {
-        var r = CommandLineParser.Parse(Array.Empty<string>());
+        var r = CommandLineParser.Parse(new[] { "--data-dir", _dir });
         Assert.True(r.Ok);
         Assert.Equal(0, r.Options!.CaptureMonitorIndex);
+    }
+
+    [Fact]
+    public void monitor默认0必须盖掉落盘的非零值_否则界面复位不回去()
+    {
+        // 面板把显示器改回主显示器时会显式传 `--monitor 0`。
+        // 这里守着相反的一侧：万一哪天把"总是传"改回"大于 0 才传"，
+        // 用户在界面上把 2 改回 0，落盘的 2 就会复活，界面和实际捕获的屏幕对不上。
+        new ServiceConfig { CaptureMonitorIndex = 2 }.Save(_dir);
+
+        var viaCli = CommandLineParser.Parse(new[] { "--data-dir", _dir, "--monitor", "0" });
+        Assert.True(viaCli.Ok);
+        Assert.Equal(0, viaCli.Options!.CaptureMonitorIndex);
+
+        // 不给 --monitor 时才回落落盘值——这才是"持久化"该有的样子。
+        var viaPersisted = CommandLineParser.Parse(new[] { "--data-dir", _dir });
+        Assert.Equal(2, viaPersisted.Options!.CaptureMonitorIndex);
     }
 
     [Fact]

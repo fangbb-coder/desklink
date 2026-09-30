@@ -245,15 +245,20 @@ public static class CommandLineParser
         options.EnableDirect = enableDirect;
         // 授权目录一律解析成绝对路径（scope 判定依赖绝对路径），并去重。
         // 合并规则：**命令行优先**——命令行给了 --file-scope 就完全以它为准；
-        // 一个都没给时才回落到上次落盘的 service.json（这就是"持久化"）。
+        // **一次都没给**时才回落到上次落盘的 service.json（这就是"持久化"）。
+        //
+        // 判据是**参数个数**而不是"归一化之后还剩几个"：写了 `--file-scope ""`
+        // 意思就是"不要授权目录"，如果按归一化后的空来判断，就会悄悄把上次落盘的
+        // 旧目录恢复回来——那正好是反着来的，方向不安全。monitor 用的是
+        // `monitorOverride is null`，两处必须是同一个语义。
         var scoped = fileScopes
             .Where(d => !string.IsNullOrWhiteSpace(d))
             .Select(d => Path.GetFullPath(d))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
-        if (scoped.Count == 0 && persisted is not null)
+        if (fileScopes.Count == 0 && persisted is not null)
         {
-            scoped = new List<string>(persisted.FileScopeRoots);
+            scoped = new List<string>(persisted.FileScopeRoots ?? new List<string>());
         }
         options.FileScopeRoots = scoped;
         if (monitorOverride is null && persisted is not null && persisted.CaptureMonitorIndex > 0)
@@ -329,14 +334,19 @@ public static class CommandLineParser
     /// <summary>
     /// 第一遍扫描：只取 --data-dir（service.json 就放在这个目录里，所以得先知道它）。
     /// 没给就用 <see cref="ServiceOptions"/> 的默认目录。
+    ///
+    /// **必须与主解析的取值规则一致（都是最后一个赢）**。这里原来写成"遇到第一个就 return"，
+    /// 于是 `--data-dir A --data-dir B` 会**从 A 读授权目录、却按 B 运行**——
+    /// 相当于把 A 的文件授权白送给 B 这个实例。选项重复本身少见，但方向是越权。
     /// </summary>
     private static string? ScanDataDir(string[] args)
     {
+        string? found = null;
         for (int i = 0; i < args.Length; i++)
         {
-            if (args[i] == "--data-dir" && i + 1 < args.Length) return args[i + 1];
+            if (args[i] == "--data-dir" && i + 1 < args.Length) found = args[i + 1];
         }
-        return null;
+        return found;
     }
 
     private static bool TryParsePort(string text, out int port)

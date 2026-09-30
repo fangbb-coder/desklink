@@ -165,6 +165,38 @@ public class FileProgressTests
     }
 
     [Fact]
+    public async Task 进度轮询在传输到达终态之后才返回_不能把完成状态又改成未知()
+    {
+        // 时序陷阱：长调用先返回 → 成功分支把 State 置 Completed、ProgressKnown 设成 true；
+        // 紧接着在途的那次 file_progress 才返回，查不到匹配 → 又被写回 false。
+        // 结果一个**已经完成**的条目挂着"未获取到分块进度"。
+        //
+        // 让假 RPC 等"条目已建立且 State != Running"才返回，把这个交错钉死。
+        // 靠 Task 调度去撞窗口是不靠得住的（有时红有时绿，等于没测）；
+        // 而且必须让**第一次**轮询就挂在 RPC 里——条件设晚了，第一次调用已经返回了。
+        TransferItem? watched = null;
+        var api = new FakeServiceApi
+        {
+            TransferGate = new TaskCompletionSource(),
+            TransferResult = new FileTransferResultDto { Ok = true, Bytes = 1024, Target = "b.bin" },
+        };
+        api.ProgressReleaseCondition = () => watched is not null && watched.State != TransferState.Running;
+
+        var vm = new FilesViewModel(api);
+        var run = vm.UploadAsync("a.bin", "b.bin");
+
+        await WaitForAsync(() => vm.Transfers.Count > 0 && api.GetFileProgressCallCount > 0);
+        watched = vm.Transfers[0];          // 条件现在观察得到它了，但 State 还是 Running
+        api.ReleaseTransfer();               // 成功分支置 Completed → 挂起的 RPC 这才返回
+
+        var item = await run;
+
+        Assert.Equal(TransferState.Completed, item.State);
+        Assert.True(item.ProgressKnown, "已完成的传输不该显示『未获取到分块进度』");
+        Assert.Contains("1 KB", item.ProgressText);
+    }
+
+    [Fact]
     public async Task 传输成功_即使中途没轮询到进度也报已完成字节()
     {
         // 传完了就是全部传完——这是确知的真值。

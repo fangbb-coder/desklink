@@ -62,7 +62,7 @@ pwsh -NoProfile -File tests/e2e-smoke.ps1 -Mode all -Transport both
 ```
 
 当前测试规模（`dotnet test DeskLink.sln`，全部真实断言、无 `Assert.True(true)` 占位）：
-Protocol 71 / Service 200 / Client 137 / DirectHandshake 41 / Agent 137 / Panel 112 = **698 通过**。
+Protocol 71 / Service 209 / Client 141 / DirectHandshake 41 / Agent 137 / Panel 126 = **725 通过**。
 
 > 2026-09-29 修复轮新增 46 个用例（见 [KnownIssues.md](./KnownIssues.md) 1.7 节：
 > 直连 UI 假接线 / 无条件"已连接" / 中继地址"已保存"但不生效）。
@@ -89,6 +89,30 @@ Protocol 71 / Service 200 / Client 137 / DirectHandshake 41 / Agent 137 / Panel 
 > `47000 + Random.Next(1000)` 取端口，只有 1000 个槽位却要喂 40+ 个并行用例，
 > 撞端口是必然（实测约 1/4 概率挂在「每个地址或端口只能使用一次」）。改成向内核
 > 要临时端口后连跑 8 次全过。
+>
+> 2026-10-01 复审轮：两份独立审查报告逐条核实后修掉 12 个缺陷，其中几个值得记住：
+>
+> - **配对结果被丢弃**：主控端「一键准备」`await PairAsync()`（void 包装）把成败扔了，
+>   失败横幅紧接着被"服务已启动""已就绪"连盖两层，用户看到一片绿而实际一台都连不上。
+>   现在是三态（没填 / 填错 / 成功），三种情况给三种话。
+> - **防火墙开关只进不退**：`RefreshFirewallAsync` 自带 `Begin/End`，切换时 `IsBusy`
+>   已经 true，于是内层 `Begin` 直接 return，状态永远不刷新——而"下次该开还是该关"
+>   正是拿这个旧值算的。
+> - **`ok` 混着"值有没有变"**：保存一个和当前一模一样的值回报 `ok=false`，
+>   客户端把它当失败弹红条。现在 `ok`=执行成功、`changed`=值变没变。
+> - **落盘失败被渲染成"已保存"**：`BuildSaveMessage` 从不读 `Persisted`，
+>   目录不可写时用户以为以后记住了，实际下次启动就退回旧值。
+> - **入参校验排在副作用之后**：合法 `file_scope_roots` + 非法 `monitor_index`
+>   会留下半套配置，异常在管道层被吞成 `internal error`。
+> - **显示器索引复位不回去**：面板原来 `>0` 才传 `--monitor`，把 2 号屏改回主显示器时
+>   传不出去，落盘的 2 复活，界面写着 0、实际捕获 2 号屏。
+> - **两个单测在改开发者自己的配置**：它们走无参 `SaveSettings()`，
+>   写真实的 `%APPDATA%\DeskLink\panel.json`；另有两个读真实 `%ProgramData%`。
+> - **一个 flaky 用例**：`E2E_Cancel` 取消时 5MB 常常已经传完，取消打在已完成的传输上。
+>
+> 这轮的 12 个变异测试（把每处修复单独回退，确认对应用例变红）**12/12 全部被抓**。
+> 顺带核实了报告里一条"源文件有字节级 UTF-8 截断"——扫了 217 个源文件，
+> 全部合法 UTF-8，**是误报**。
 
 ### 图形化：DeskLink 控制面板
 

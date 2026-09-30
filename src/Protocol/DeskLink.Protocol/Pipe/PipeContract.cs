@@ -266,8 +266,20 @@ public sealed class SetConfigParams
 
 public sealed class SetConfigResult
 {
+    /// <summary>
+    /// 本次调用**成功执行**（参数合法、没有抛异常）。
+    ///
+    /// 契约诚实性：这里表达的是"操作做成了"，**不是**"值变了"。
+    /// 保存一个和当前一模一样的值也是成功的；把它回报成 false，
+    /// 客户端会拿"同值保存"当失败弹错误，用户越点越困惑。
+    /// 值有没有变请读 <see cref="Changed"/>。
+    /// </summary>
     [JsonPropertyName("ok")]
     public bool Ok { get; set; }
+
+    /// <summary>与调用前的值相比，本次是否有字段真的发生了变化（false = 存了个相同值）。</summary>
+    [JsonPropertyName("changed")]
+    public bool Changed { get; set; }
 
     [JsonPropertyName("firewall_repaired")]
     public bool FirewallRepaired { get; set; }
@@ -282,7 +294,13 @@ public sealed class SetConfigResult
     [JsonPropertyName("requires_restart")]
     public bool RequiresRestart { get; set; }
 
-    /// <summary>面向用户的说明文案（已本地化）；无需重启时为 null。</summary>
+    /// <summary>
+    /// 面向用户的说明文案（已本地化）；**没有任何需要用户处理的事**时才为 null。
+    ///
+    /// 两种非 null 的情况：需要重启才生效，或**没能落盘**（下次启动会退回旧值）。
+    /// 后者与"要不要重启"无关——值没变的保存同样可能是写盘失败，
+    /// 那种情况照样必须说出来，否则用户会把"没记住"当成"记住了"。
+    /// </summary>
     [JsonPropertyName("restart_hint")]
     public string? RestartHint { get; set; }
 

@@ -688,20 +688,38 @@ public class FileTransferTests : IDisposable
     {
         var srcRoot = NewDir("cx-src");
         var dstRoot = NewDir("cx-dst");
-        WriteFile(Path.Combine(srcRoot, "big.bin"), 5_000_000, seed: 23);
+        // 32MB 不是随便挑的：这个用例要取消一条**正在进行**的传输，
+        // 而传输得慢到"进行中"是个能被采样到的状态。原来的 5MB 在回环上常常一两拍就传完，
+        // 于是取消打在一条已经结束的传输上 —— 传输确实成功了，用例随机红，且和被测代码无关。
+        WriteFile(Path.Combine(srcRoot, "big.bin"), 32_000_000, seed: 23);
 
         var (a, b, _, _) = CreatePair(new FileTransferScope(new[] { srcRoot }),
                                       new FileTransferScope(new[] { dstRoot }));
         try
         {
             var upload = a.UploadAsync("big.bin", "big.bin", FileConflictPolicy.Overwrite);
-            // 等传输真正开始，再取消（否则可能还没建传输就取消了）。
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            while (a.ActiveTransfers == 0 && sw.ElapsedMilliseconds < 3000) await Task.Delay(20);
-            Assert.True(a.ActiveTransfers > 0, "传输应已开始");
 
-            var id = a.Snapshot().First(p => p.Direction == TransferDirection.Sending).TransferId;
-            a.Cancel(id);
+            // 等 Snapshot 里出现一条**状态为 sending 的**发送传输再取消。
+            // 只等 ActiveTransfers > 0 不够：那是"建过传输"，不保证此刻还活着。
+            // FileTransferProgress 是值类型，不能用 FirstOrDefault + null 判断，只能手工扫。
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            uint liveId = 0;
+            while (sw.ElapsedMilliseconds < 15_000)
+            {
+                foreach (var p in a.Snapshot())
+                {
+                    if (p.Direction == TransferDirection.Sending && p.State == "sending")
+                    {
+                        liveId = p.TransferId;
+                        break;
+                    }
+                }
+                if (liveId != 0) break;
+                await Task.Delay(10);
+            }
+            Assert.True(liveId != 0, "应观察到一条进行中的发送传输");
+
+            a.Cancel(liveId);
 
             var outcome = await upload.WaitAsync(TimeSpan.FromSeconds(20));
             Assert.False(outcome.Ok);

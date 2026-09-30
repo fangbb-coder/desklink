@@ -331,7 +331,7 @@ public class SettingsRestartHintTests
     public async Task SaveAsync_Without_Restart_Keeps_Plain_Message()
     {
         var api = new FakeServiceApi();
-        api.NextSetConfigResult = new SetConfigResult { Ok = true, RequiresRestart = false };
+        api.NextSetConfigResult = new SetConfigResult { Ok = true, RequiresRestart = false, Persisted = true };
         var vm = NewSettings(api);
         vm.RelayUrl = "https://relay.example:8443";
         vm.DirectPort = 47200;
@@ -340,6 +340,75 @@ public class SettingsRestartHintTests
 
         Assert.True(ok);
         Assert.False(vm.PendingRestart);
+        Assert.Equal("已保存", vm.StatusMessage);
+    }
+
+    [Fact]
+    public async Task SaveAsync_落盘失败时绝不能说已保存()
+    {
+        // PipeContract 明确承诺过"UI 必须把落盘失败说出来"。
+        // 以前 BuildSaveMessage 从不读 Persisted，目录不可写时照样弹"已保存"——
+        // 用户以为以后都记住了，实际下次启动就静默退回旧值。
+        var api = new FakeServiceApi();
+        api.NextSetConfigResult = new SetConfigResult
+        {
+            Ok = true,
+            RequiresRestart = false,   // 值没变，不需要重启——这正是最容易漏掉的那条路径
+            Persisted = false,
+        };
+        var vm = NewSettings(api);
+        vm.RelayUrl = "https://relay.example:8443";
+        vm.DirectPort = 47200;
+
+        var ok = await vm.SaveAsync();
+
+        Assert.True(ok);                              // 执行本身是成功的
+        Assert.DoesNotContain("已保存", vm.StatusMessage);  // 但不能说"已保存"
+        Assert.Contains("未保存到磁盘", vm.StatusMessage);
+    }
+
+    [Fact]
+    public async Task SaveAsync_落盘失败且需要重启_两条提示都要在()
+    {
+        var api = new FakeServiceApi();
+        api.NextSetConfigResult = new SetConfigResult
+        {
+            Ok = true,
+            RequiresRestart = true,
+            Persisted = false,
+            RestartHint = "文件授权目录需要**重启 DeskLinkService 后才会对已建立的会话生效**。",
+        };
+        var vm = NewSettings(api);
+        vm.RelayUrl = "https://relay.example:8443";
+        vm.DirectPort = 47200;
+
+        await vm.SaveAsync();
+
+        Assert.Contains("未保存到磁盘", vm.StatusMessage);
+        Assert.Contains("重启", vm.StatusMessage);
+        Assert.True(vm.PendingRestart);
+    }
+
+    [Fact]
+    public async Task SaveAsync_值没变也算成功_不能被当成失败()
+    {
+        // 服务端 ok 现在表达"执行成功"，changed 才表达"值有没有变"。
+        // 存一个一模一样的值必须照样返回 true 并说"已保存"。
+        var api = new FakeServiceApi();
+        api.NextSetConfigResult = new SetConfigResult
+        {
+            Ok = true,
+            Changed = false,
+            RequiresRestart = false,
+            Persisted = true,
+        };
+        var vm = NewSettings(api);
+        vm.RelayUrl = "https://relay.example:8443";
+        vm.DirectPort = 47200;
+
+        var ok = await vm.SaveAsync();
+
+        Assert.True(ok);
         Assert.Equal("已保存", vm.StatusMessage);
     }
 

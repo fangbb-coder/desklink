@@ -40,7 +40,14 @@ public partial class MainWindow : Window
         // 那样会走 ToString() 得到类型名。这里自己追加，顺带做行数上限与自动滚动。
         _vm.Log.CollectionChanged += OnLogChanged;
 
+        // 提权已发起：等当前命令跑完就退位，把界面让给管理员权限的新实例。
+        // 走命令统一收尾而不是绑在某个按钮上——触发提权的路径有好几条
+        // （放行入站端口、一键准备被控端…），漏掉任何一条都会留下两个并存的面板实例，
+        // 用户对着两个"已就绪"横幅不知道哪个是真的。
         _vm.ElevationRequested += () => _elevationRestarting = true;
+        _vm.ElevationRetire = RetireIfElevating;
+        _vm.CommandFailed += ex => MessageBox.Show(
+            this, ex.Message, "DeskLink 控制面板", MessageBoxButton.OK, MessageBoxImage.Error);
 
         if (!startServicePolling) return;
 
@@ -78,25 +85,17 @@ public partial class MainWindow : Window
         LogBox.ScrollToEnd();
     }
 
-    private void OnPrepareControlledClick(object sender, RoutedEventArgs e) => _ = RunGuarded(_vm.PrepareControlledAsync);
-
-    private void OnPrepareControllerClick(object sender, RoutedEventArgs e) => _ = RunGuarded(_vm.PrepareControllerAsync);
-
-    private async Task RunGuarded(Func<Task> action)
+    /// <summary>
+    /// 包一层异常兜底 + 提权后自动退位。
+    ///
+    /// 触发方式刻意改成 <c>Command</c>（不再是 <c>Click</c>）：两个「一键准备」Command 的
+    /// <c>CanExecute</c> 是 <c>!IsBusy</c>，绑 Click 等于把这个重入保护绕开——
+    /// 第二次点会重跑一半流程，最后照样弹一句"已就绪"，而服务根本没起来。
+    /// 异常兜底同步下沉到 <see cref="ViewModels.MainViewModel.RunCommand"/>，这里不再重复兜。
+    /// </summary>
+    private void RetireIfElevating()
     {
-        try
-        {
-            await action();
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(this, ex.Message, "DeskLink 控制面板", MessageBoxButton.OK, MessageBoxImage.Error);
-        }
-        finally
-        {
-            // 提权重启已发起：关掉自己，把位置让给管理员权限的新实例。
-            if (_elevationRestarting) Close();
-        }
+        if (_elevationRestarting) Close();
     }
 
     private void OnCopyPublicKeyClick(object sender, RoutedEventArgs e) => Copy(_vm.PublicKey, "公钥");
@@ -142,9 +141,9 @@ public partial class MainWindow : Window
 
     protected override async void OnClosing(CancelEventArgs e)
     {
-        _statusTimer?.Stop();
-        _vm.Log.CollectionChanged -= OnLogChanged;
-
+        // 顺序有讲究：先问，确认要关了才拆。
+        // 原来 Stop 定时器 / 摘事件排在确认之前，于是用户点「否」之后面板就成了僵尸——
+        // 状态永远不刷新、日志不再滚动，而且没有任何地方会把它们装回去。
         if (_host.IsServiceRunning)
         {
             var answer = MessageBox.Show(this,
@@ -152,6 +151,9 @@ public partial class MainWindow : Window
                 "DeskLink 控制面板", MessageBoxButton.OKCancel, MessageBoxImage.Question);
             if (answer != MessageBoxResult.OK) { e.Cancel = true; return; }
         }
+
+        _statusTimer?.Stop();
+        _vm.Log.CollectionChanged -= OnLogChanged;
 
         // 只有真实的 LocalServiceHost 才持有子进程句柄需要释放；
         // 测试注入的替身不实现 IAsyncDisposable，这里自然跳过。

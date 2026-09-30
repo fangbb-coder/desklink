@@ -41,16 +41,17 @@ public sealed class ServiceConfig
     public int CaptureMonitorIndex { get; set; }
 
     public static string PathFor(string dataDir) =>
-        System.IO.Path.Combine(dataDir, "service.json");
+        System.IO.Path.Combine(dataDir ?? "", "service.json");
 
     /// <summary>
-    /// 读取持久化配置。文件不存在 / 损坏 / 不可读时返回 null（调用方按"没有默认值"处理），
-    /// 绝不让一个坏掉的 service.json 阻止 Service 启动。
+    /// 读取持久化配置。文件不存在 / 损坏 / 不可读 / 内容离谱时返回 null
+    /// （调用方按"没有默认值"处理），绝不让一个坏掉的 service.json 阻止 Service 启动。
     /// </summary>
     public static ServiceConfig? TryLoad(string dataDir)
     {
         try
         {
+            if (string.IsNullOrWhiteSpace(dataDir)) return null;
             var path = PathFor(dataDir);
             if (!File.Exists(path)) return null;
             var json = File.ReadAllText(path);
@@ -58,7 +59,14 @@ public sealed class ServiceConfig
             if (cfg is null) return null;
 
             // 归一化：路径取绝对路径并去重，与命令行分支保持同一套规则。
-            cfg.FileScopeRoots = cfg.FileScopeRoots
+            //
+            // `?? new()` 不是防御性冗余：System.Text.Json 遇到显式的
+            // `{"file_scope_roots": null}` 会**直接调 setter 把属性置 null**，
+            // 属性初始化器 `= new()` 根本不参与。少了它就是一个 NRE，而 NRE 不在
+            // 任何异常过滤器里 —— 它会一路掀翻 CommandLineParser.Parse 和
+            // Program.Main（那里没有 try/catch），让 LocalSystem 服务带着栈崩在启动时，
+            // 正好违反本文件头写的承诺。
+            cfg.FileScopeRoots = (cfg.FileScopeRoots ?? new List<string>())
                 .Where(d => !string.IsNullOrWhiteSpace(d))
                 .Select(d => Path.GetFullPath(d))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -66,8 +74,12 @@ public sealed class ServiceConfig
             if (cfg.CaptureMonitorIndex < 0) cfg.CaptureMonitorIndex = 0;
             return cfg;
         }
-        catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException or ArgumentException)
+        catch (Exception)
         {
+            // 这里只有一种正确语义："读不出来就当没有默认值"。
+            // 逐类型枚举（IOException / JsonException / …）是 bug 温床——NRE、
+            // ArgumentException、NotSupportedException、SecurityException，
+            // 每漏一个就是一条崩溃路径。配置文件是外部输入，不是可信输入。
             return null;
         }
     }
@@ -77,14 +89,16 @@ public sealed class ServiceConfig
     {
         try
         {
+            if (string.IsNullOrWhiteSpace(dataDir)) return false;
             var path = PathFor(dataDir);
             var dir = System.IO.Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
             File.WriteAllText(path, JsonSerializer.Serialize(this, Options));
             return true;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception)
         {
+            // 同上：写不进去就如实返回 false，绝不让异常掀翻 SetConfig 的调用方。
             return false;
         }
     }

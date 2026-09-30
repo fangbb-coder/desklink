@@ -77,7 +77,11 @@ public class ServiceCoreDirectDialTests : IDisposable
         // 同一个地址重复保存：不应报"有变更"，更不该提示要重启。
         var result = core.SetConfig("https://same.example:8443", null);
 
-        Assert.False(result.Ok);
+        // 这里以前断言的是 Assert.False(result.Ok) —— 那是把缺陷当规范写下来了：
+        // ok 混着"值有没有变"，客户端于是把"同值保存"当失败弹红条。
+        // 现在分工明确：ok = 执行成功，changed = 值变了没有。
+        Assert.True(result.Ok);
+        Assert.False(result.Changed);
         Assert.False(result.RequiresRestart);
         Assert.Null(result.RestartHint);
     }
@@ -137,6 +141,125 @@ public class ServiceCoreDirectDialTests : IDisposable
         var core = NewCore(options);
 
         Assert.Throws<ArgumentException>(() => core.SetConfig("not a url", null));
+    }
+
+    // ───────────────────── 参数校验必须排在副作用之前 ─────────────────────
+
+    [Fact]
+    public void SetConfig_非法monitorIndex不能留下半套配置()
+    {
+        // 校验排在副作用之后时会发生什么：file_scope_roots 先写进 _options，
+        // 下一个参数才抛异常；异常在管道层被吞成 "internal error"，
+        // 于是用户看到一句没头没尾的报错，内存里的授权目录却已经变了、还没落盘。
+        var options = new ServiceOptions
+        {
+            DataDir = _tmp,
+            FileScopeRoots = new List<string> { @"C:\old\share" },
+        };
+        var core = NewCore(options);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            core.SetConfig(null, null, new[] { @"D:\new\share" }, -1));
+
+        Assert.Equal(new[] { @"C:\old\share" }, options.FileScopeRoots);
+        // 内存没变，就不该留下一个"下次启动会生效"的落盘文件
+        Assert.False(File.Exists(Path.Combine(_tmp, "service.json")));
+    }
+
+    [Fact]
+    public void SetConfig_非法relayUrl同样不能留下半套配置()
+    {
+        var options = new ServiceOptions
+        {
+            DataDir = _tmp,
+            FileScopeRoots = new List<string> { @"C:\old\share" },
+        };
+        var core = NewCore(options);
+
+        Assert.Throws<ArgumentException>(() =>
+            core.SetConfig("not a url", null, new[] { @"D:\new\share" }, 2));
+
+        Assert.Equal(new[] { @"C:\old\share" }, options.FileScopeRoots);
+        Assert.False(File.Exists(Path.Combine(_tmp, "service.json")));
+    }
+
+    // ───────────────────── ok 表达"成功"而不是"变了" ─────────────────────
+
+    [Fact]
+    public void SetConfig_存了相同的值也是成功()
+    {
+        // 以前 Ok 跟着 changed 走：同值保存回报 false，客户端会弹红条当失败，
+        // 用户点一次被气一次，却什么也没改坏。
+        var options = new ServiceOptions
+        {
+            DataDir = _tmp,
+            FileScopeRoots = new List<string> { @"C:\same\share" },
+            CaptureMonitorIndex = 2,
+        };
+        var core = NewCore(options);
+
+        var result = core.SetConfig(null, null, new[] { @"C:\same\share" }, 2);
+
+        Assert.True(result.Ok);
+        Assert.False(result.Changed);
+        Assert.False(result.RequiresRestart);
+    }
+
+    [Fact]
+    public void SetConfig_值变了要如实回报changed()
+    {
+        var options = new ServiceOptions { DataDir = _tmp, CaptureMonitorIndex = 0 };
+        var core = NewCore(options);
+
+        var result = core.SetConfig(null, null, new[] { @"D:\share" }, 3);
+
+        Assert.True(result.Ok);
+        Assert.True(result.Changed);
+    }
+
+    // ───────────────────── 落盘失败必须说出来 ─────────────────────
+
+    [Fact]
+    public void SetConfig_值没变但落盘失败_仍然必须给出提示()
+    {
+        // 这条路径以前完全没法说出口：BuildRestartHint 见 !requiresRestart 就 return null，
+        // 于是"同值保存 + 写盘失败"被渲染成一句"已保存"——用户以为记住了，实际没记住。
+        //
+        // 造一个真的写不进去的 DataDir：在 data-dir 的位置上先放一个**同名文件**，
+        // Save 里的 Directory.CreateDirectory 就会抛，落到 catch 返回 false。
+        // （只用一个不存在的目录是没用的——Save 会自己把它建出来。）
+        var blocker = Path.Combine(_tmp, "blocker");
+        File.WriteAllText(blocker, "这是文件，不是目录");
+        var broken = new ServiceOptions
+        {
+            DataDir = Path.Combine(blocker, "sub"),
+            CaptureMonitorIndex = 1,
+        };
+        var brokenCore = NewCore(broken);
+
+        // 只传 monitorIndex 且与当前相同 → changed=false、requiresRestart=false
+        var result = brokenCore.SetConfig(null, null, monitorIndex: 1);
+
+        Assert.True(result.Ok);
+        Assert.False(result.Changed);
+        Assert.False(result.RequiresRestart);
+        Assert.False(result.Persisted);
+        Assert.False(string.IsNullOrWhiteSpace(result.RestartHint));
+        Assert.Contains("落盘", result.RestartHint);
+    }
+
+    [Fact]
+    public void SetConfig_正常落盘时persisted为真且无多余提示()
+    {
+        var options = new ServiceOptions { DataDir = _tmp, CaptureMonitorIndex = 0 };
+        var core = NewCore(options);
+
+        var result = core.SetConfig(null, null, new[] { @"D:\share" }, 0);
+
+        Assert.True(result.Persisted);
+        // 有变化 → 需要重启 → 有提示是合理的
+        Assert.Contains("重启", result.RestartHint);
+        Assert.True(File.Exists(Path.Combine(_tmp, "service.json")));
     }
 
     // ───────────────────────── 缺陷①：direct_dial ─────────────────────────

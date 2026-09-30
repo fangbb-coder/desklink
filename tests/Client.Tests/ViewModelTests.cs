@@ -115,7 +115,9 @@ internal sealed class FakeServiceApi : IServiceApi
         GetFileProgressCallCount++;
         FailIfUnavailable();
         if (FileProgressThrows) throw new InvalidOperationException("管道断了");
-        return Task.FromResult(new FileProgressResult { Transfers = FileProgressEntries });
+        return ProgressReleaseCondition is not null
+            ? ProgressGateAsync()
+            : Task.FromResult(new FileProgressResult { Transfers = FileProgressEntries });
     }
 
     public Task<StartAgentResult> StartAgentAsync(bool inject, bool noInject, string? pipeOverride, CancellationToken ct = default)
@@ -179,12 +181,36 @@ internal sealed class FakeServiceApi : IServiceApi
 
     private async Task<FileTransferResultDto> Gate(FileTransferResultDto result)
     {
-        if (TransferGate is not null)
-        {
-            try { await TransferGate.Task.WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false); }
-            catch (TimeoutException) { /* 超时也要往下走，别把测试挂死在这里 */ }
-        }
+        if (TransferGate is not null) await WaitGateAsync(TransferGate).ConfigureAwait(false);
         return result;
+    }
+
+    /// <summary>
+    /// 非空时，<c>GetFileProgressAsync</c> 会一直挂起，直到 <see cref="ProgressReleaseCondition"/>
+    /// 返回 true（或 <see cref="ReleaseTransfer"/> 被调用）。
+    ///
+    /// 用途是**确定性**制造"进度 RPC 恰好在传输到达终态之后才返回"这一交错。
+    /// 靠 Task 调度去撞这个窗口是不靠得住的——续体跑在哪个线程、谁先谁后都不确定，
+    /// 撞出来的测试有时红有时绿，等于没有。改成让 RPC 自己等一个可观测条件，
+    /// 时序就被钉死了。
+    /// </summary>
+    public Func<bool>? ProgressReleaseCondition { get; set; }
+
+    private async Task<FileProgressResult> ProgressGateAsync()
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (ProgressReleaseCondition is not null && !ProgressReleaseCondition())
+        {
+            if (DateTime.UtcNow > deadline) break;   // 条件永远不成立时也要往下走
+            await Task.Delay(10).ConfigureAwait(false);
+        }
+        return new FileProgressResult { Transfers = FileProgressEntries };
+    }
+
+    private static async Task WaitGateAsync(TaskCompletionSource gate)
+    {
+        try { await gate.Task.WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false); }
+        catch (TimeoutException) { /* 超时也要往下走，别把测试挂死在这里 */ }
     }
 
     public Task<FileTransferResultDto> DownloadFileAsync(string remote, string local, string policy, CancellationToken ct = default)

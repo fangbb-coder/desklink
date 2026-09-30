@@ -234,6 +234,21 @@ public sealed class ServiceCore : IServiceCore
         var oldRelay = _options.RelayUrl?.ToString();
         var changed = false;
 
+        // ── 全部入参先校验，再动任何状态 ──
+        //
+        // 顺序有讲究：校验一旦放在副作用之后，一次非法调用就会留下半套配置。
+        // 例如 fileScopeRoots 合法 + monitorIndex = -1：授权目录已经改进 _options 了，
+        // 下一个参数才抛异常，而异常在管道层被吞成 "internal error" ——
+        // 用户看到的是一句没头没尾的报错，内存里的授权目录却已经变了，还没落盘。
+        if (relayUrl != null && !Uri.TryCreate(relayUrl, UriKind.Absolute, out _))
+        {
+            throw new ArgumentException("relayUrl invalid");
+        }
+        if (monitorIndex is < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(monitorIndex), "monitorIndex must be >= 0");
+        }
+
         // 中继地址改了 → 标注"需重启"。
         //
         // 原因（不要在这里"顺手"重建连接）：RelayClient 持有到 relay 的传输、
@@ -244,10 +259,7 @@ public sealed class ServiceCore : IServiceCore
         var requiresRestart = false;
         if (relayUrl != null)
         {
-            if (!Uri.TryCreate(relayUrl, UriKind.Absolute, out var u))
-            {
-                throw new ArgumentException("relayUrl invalid");
-            }
+            var u = new Uri(relayUrl, UriKind.Absolute);   // 上面已校验可解析
             if (u.ToString() != oldRelay)
             {
                 _options.RelayUrl = u;
@@ -287,10 +299,6 @@ public sealed class ServiceCore : IServiceCore
         }
         if (monitorIndex is not null && monitorIndex.Value != _options.CaptureMonitorIndex)
         {
-            if (monitorIndex.Value < 0)
-            {
-                throw new ArgumentOutOfRangeException(nameof(monitorIndex), "monitorIndex must be >= 0");
-            }
             _options.CaptureMonitorIndex = monitorIndex.Value;
             changed = true;
             requiresRestart = true;   // Agent 已经带着旧索引起来了
@@ -312,7 +320,8 @@ public sealed class ServiceCore : IServiceCore
 
         return new SetConfigResult
         {
-            Ok = changed,
+            Ok = true,          // 走到这里就说明参数合法、没失败。值有没有变看 Changed。
+            Changed = changed,  // 存了和当前一样的值也是成功，别让客户端把它当失败。
             FirewallRepaired = firewallRepaired,
             RequiresRestart = requiresRestart,
             Persisted = persistedOk,
@@ -322,20 +331,26 @@ public sealed class ServiceCore : IServiceCore
 
     private static string? BuildRestartHint(bool requiresRestart, bool persisted, bool touchedPersistentFields)
     {
-        if (!requiresRestart) return null;
-
         var parts = new List<string>();
+
+        // 落盘失败和"要不要重启"是两件独立的事。原先这里 !requiresRestart 就直接 return null，
+        // 于是"值没变 + 写盘失败"会走成一句"已保存"——用户以为以后都记住了，其实下次启动就退回旧值。
         if (!persisted)
         {
             parts.Add("⚠ **未能落盘**到 data-dir\\service.json（目录不可写？）——" +
                       "本次运行已按新值执行，但**下次启动会退回旧值**。");
         }
-        if (touchedPersistentFields)
+
+        if (requiresRestart)
         {
-            parts.Add("文件授权目录 / 捕获显示器索引需要**重启 DeskLinkService 后才会对已建立的会话生效**。");
+            if (touchedPersistentFields)
+            {
+                parts.Add("文件授权目录 / 捕获显示器索引需要**重启 DeskLinkService 后才会对已建立的会话生效**。");
+            }
+            parts.Add("中继地址同样需重启后才会生效（当前进程仍在使用旧地址）。");
         }
-        parts.Add("中继地址同样需重启后才会生效（当前进程仍在使用旧地址）。");
-        return string.Join("\n", parts);
+
+        return parts.Count == 0 ? null : string.Join("\n", parts);
     }
 
     /// <summary>
