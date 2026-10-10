@@ -868,7 +868,16 @@ public sealed class FileTransferEngine : IAsyncDisposable
 
         if (_sends.TryGetValue(st.TransferId, out var s))
         {
-            if (st.Status == FileTransferStatus.Cancelled) { s.Cancelled = true; s.ResumeSignal.Pulse(); }
+            if (st.Status == FileTransferStatus.Cancelled)
+            {
+                s.Cancelled = true;
+                s.ResumeSignal.Pulse();
+                // 同时唤醒 AckSignal：发送循环此刻若阻塞在 WaitAckAdvanceAsync
+                // (RunSenderAsync 送完一批块等对端 ack)，单 pulse ResumeSignal 不足以
+                // 让它返回——必须等满 PeerTimeout (60s) 才超时。修这一行之前这是
+                // 真实存在的 60s 取消感知延迟（独立审计 2026-10-08 复审发现）。
+                s.AckSignal.Pulse();
+            }
             else if (st.Status == FileTransferStatus.Paused) { s.Paused = true; }
             else if (st.Status == FileTransferStatus.Resumed) { s.Paused = false; s.ResumeSignal.Pulse(); }
         }

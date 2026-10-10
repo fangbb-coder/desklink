@@ -732,6 +732,68 @@ public class FileTransferTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// 1.10 取消信号错位（独立审计 2026-10-08 复审发现）。
+    ///
+    /// 与 E2E_Cancel_SenderStopsAndReceiverDropsPart 配对：那一条是**本地 cancel**
+    /// (a.Cancel(id))，本条是**对端 cancel**（对端 FileTransferEngine 发 FileStatus(Cancelled)）。
+    ///
+    /// 修前症状：sender 阻塞在 WaitAckAdvanceAsync 等 AckSignal，旧代码只 pulse
+    /// ResumeSignal，sender 必须等满 PeerTimeout=60s 才超时返回。
+    /// 修后：HandleStatusFrame 在 Cancelled 分支同时 pulse ResumeSignal + AckSignal，
+    /// 1s 内立即返回 Fail。
+    /// </summary>
+    [Fact]
+    public async Task E2E_PeerCancel_SenderReturnsWithinOneSecond()
+    {
+        var srcRoot = NewDir("pc-src");
+        var dstRoot = NewDir("pc-dst");
+        // 同样 32MB：等 sending 状态必须传输慢到能被采样到。
+        WriteFile(Path.Combine(srcRoot, "big.bin"), 32_000_000, seed: 23);
+
+        var (a, b, _, _) = CreatePair(new FileTransferScope(new[] { srcRoot }),
+                                      new FileTransferScope(new[] { dstRoot }));
+        try
+        {
+            var upload = a.UploadAsync("big.bin", "big.bin", FileConflictPolicy.Overwrite);
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            uint liveId = 0;
+            while (sw.ElapsedMilliseconds < 15_000)
+            {
+                foreach (var p in a.Snapshot())
+                {
+                    if (p.Direction == TransferDirection.Sending && p.State == "sending")
+                    {
+                        liveId = p.TransferId;
+                        break;
+                    }
+                }
+                if (liveId != 0) break;
+                await Task.Delay(10);
+            }
+            Assert.True(liveId != 0, "应观察到一条进行中的发送传输");
+
+            // 模拟对端（这里就是 b）发送 FileStatus(Cancelled) 给 a。
+            // 直接调 a.OnFrame 走真实接收路径 → HandleStatusFrame → 修复后的两个 Pulse。
+            var statusPayload = FileTransferFrames.EncodeStatus(
+                liveId, FileTransferStatus.Cancelled, "peer cancel");
+            a.OnFrame(new InboundFrame(
+                ProtocolConstants.FrameType.FileStatus, statusPayload, StreamId.FileBase));
+
+            // 修复前：必须等 PeerTimeout (60s) 超时。
+            // 修复后：< 1s 内必须返回。给到 1s 阈值留点 CI 抖动空间，但远小于 60s。
+            var outcome = await upload.WaitAsync(TimeSpan.FromSeconds(1));
+            Assert.False(outcome.Ok, $"peer cancel 后 sender 必须返回失败，实际 outcome={outcome}");
+            Assert.False(File.Exists(Path.Combine(dstRoot, "big.bin")), "取消后不得产生目标文件");
+        }
+        finally
+        {
+            await a.DisposeAsync();
+            await b.DisposeAsync();
+        }
+    }
+
     // ────────────────────────────────────────────────────────────────────────
     // 注入的 IO 替身
     // ────────────────────────────────────────────────────────────────────────
