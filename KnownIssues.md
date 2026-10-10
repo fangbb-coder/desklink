@@ -480,6 +480,134 @@ Service 的两类管道（RPC 与媒体）都以 SYSTEM/Administrators/创建者
 
 ---
 
+## 4.4 P9 打磨：自适应码率 + 720p 软件上限 + 显示器变化主动检测
+
+> 交付项（非穷举，每条都已由单测固定不变式或可复跑脚本验证）。
+
+### 4.4.1 自适应码率（先码率/帧率，再分辨率）
+
+- 实现：`DeskLink.DesktopAgent/Quality/AdaptiveBitrateController.cs`
+- 阶梯（`Ladder`）：从满画质起，**先**降码率（100%→75%→50%），**再**降帧率（→75%→60%），
+  **最后**才动分辨率（→75%→50%）。恢复按相反顺序：先补回分辨率，再补帧率，最后补码率。
+- 迟滞带 + 冷却时间（默认 1s）+ 恢复需要连续 8 个良好样本：避免抖动（自适应码率最典型的失败模式）。
+- 触发降级的信号：RTT 高 / 丢帧率高 / 编码耗时超预算 / 客户端队列深 / **输入积压**
+  （DESIGN 明确"以保持输入控制响应"，所以输入被丢时主动牺牲画质）。
+- **闭环信号源**：代理自己看不到链路状况，靠 Service 转发泵的 `MediaFlow` 帧回传
+  丢帧数/队列深度/输入丢弃数 → 控制器据此降档。
+
+### 4.4.2 软件 MFT 720p 硬上限
+
+- 实现：`H264EncoderSettings.ClampForSoftwareEncoder(w, h)` 在 `H264Encoder.TryConfigure` 中按"候选是软件"分支应用。
+- 公式：短边 720 / 长边 1280，等比缩放，强制偶数边（NV12 要求）。
+- **为什么不能写在 `TryCreate` 顶层**：那样会把硬件候选也卡到 720p；要在选择每个候选的当下分别处理。
+- 单测：`H264EncoderSettingsCapTests`（8 个用例：不动小于上限、1920×1080→1280×720、纵向 1080×1920→720×1280、强制偶数、不放大、零/负值透传）。
+- 与"自适应降级"的关系：自适应是**链路**侧的妥协（带宽变差），720p 上限是**编码器**侧的能力上限（软编 1080p 卡）。两条独立。
+
+### 4.4.3 显示器变化主动检测
+
+- 实现：`DeskLink.DesktopAgent/Capture/DisplayChangeWatcher.cs`
+- 工作方式：message-only 窗口 + 独立 STA 线程消息循环；监听 `WM_DISPLAYCHANGE` /
+  `WM_SETTINGCHANGE`（DPI 变化）/ `WM_POWERBROADCAST`（挂起/恢复）。
+- 为什么需要：DXGI 在模式变化时**会**返回 `ACCESS_LOST`，但那是被动发现。
+  主动监听让"正在恢复画面"状态条提前点亮，避免黑窗期被用户误判为掉线。
+- **状态机**：`AccessLostRecovery` 在管线重建期间发 `OnStateChanged("正在恢复画面")`，
+  重建成功发 `"画面已恢复"`——DisplayChangeWatcher 的事件订阅方负责触发该重建。
+- 单测覆盖：行为由 `AccessLostRecoveryTests` 钉死（IsRecovering/RebuildCount/状态回调序列）。
+
+### 4.4.4 多显示器 + 旋转
+
+- 实现：单显示器由 `--monitor <name>` 选取（0=主显示器，已由 P8 面板透传到 Service）。
+  旋转由 `--rotation <0/90/180/270>` 选取；旋转在 **BGRA 阶段**做（而非 NV12 阶段，
+  避免 2x2 色度子采样错位）。
+- `DesktopConfigPayload` 携带 `MonitorIndex` + `RotationDegrees`，客户端据此初始化解码器。
+- 切换显示器不创建第二路并行画面（DESIGN 明确）：切显示器通过触发 ACCESS_LOST 让管线重建，
+  由 DisplayChangeWatcher / DXGI 共同驱动。
+- 旋转会交换宽高（90°/270°），编码器必须用**旋转后**尺寸，否则 MFT 拒绝（`MF_E_TRANSFORM_TYPE_NOT_SET`）。
+
+---
+
+## 1.10 2026-10-10 复审轮：取消信号错位（peer cancel 后 sender 阻塞 60s）
+
+> **本节由独立审计 2026-10-08 复审发现**（与 1.5-1.9 交付后审查区分）。
+> 修复 commit：`3eb3cfae96f5c7540fdf7ef1df72f81716083097`（`fix: 修 P6 取消信号错位`）。
+
+### 症状
+
+对端通过 UI 点取消 → 对端 `FileTransferEngine.Cancel` → 对端发
+`FileStatus(Cancelled)` → 本端 `HandleStatusFrame` 收到。
+
+修前 sender 行为：必须等满 `PeerTimeout = 60s` 才超时返回 Fail。
+用户看到"传输卡死一分钟"，上层会话往往已断。
+
+### 根因
+
+`HandleStatusFrame` 把 `Cancelled` 当成纯流控指令处理，只 pulse 了
+`ResumeSignal`：
+
+```csharp
+if (st.Status == FileTransferStatus.Cancelled)
+{
+    s.Cancelled = true;
+    s.ResumeSignal.Pulse();
+    // ← 缺：没 pulse AckSignal
+}
+```
+
+sender 阻塞点有两个独立 signal：
+- `ResumeSignal` — `WaitWhilePausedAsync` 等（流控暂停唤醒）
+- `AckSignal` — `WaitAckAdvanceAsync` 等（一批块送完等对端 ack）
+
+sender 当前阻塞在哪个取决于调度时机。`WaitWhilePausedAsync` 在循环开头
+会 `if (t.Cancelled) return` 立即退出；但 `WaitAckAdvanceAsync` 没有这层
+短路——它只 `await t.AckSignal.WaitAsync(deadline - now, ct)`，60s 内
+没 pulse 就只能 timeout 才会再检查 `t.Cancelled`。
+
+也就是说"cancel 是一个流控解除事件"的语义只覆盖了一半等待路径。
+
+### 修法
+
+`HandleStatusFrame` 的 `Cancelled` 分支同时 pulse 两个 signal：
+
+```csharp
+if (st.Status == FileTransferStatus.Cancelled)
+{
+    s.Cancelled = true;
+    s.ResumeSignal.Pulse();   // 唤醒 WaitWhilePausedAsync
+    s.AckSignal.Pulse();       // 唤醒 WaitAckAdvanceAsync（本次新增）
+}
+```
+
+- `PeerTimeout = 60s` 默认值不变——这本来就是"对端真死（进程挂起但连接
+  未断）"场景的兜底；取消是一个结论性事件，不应吃这个兜底超时。
+- 不动 `WaitAckAdvanceAsync` 自身的 60s 等待——若对端真死，60s 后仍
+  超时返回（这条路径不受本次改动影响）。
+- 不动 `_statusWaiters` 路径——line 869 之后的"结论性状态唤醒 statusWaiters"
+  分支已经覆盖 `SendCompleteAndWaitStatusAsync` 的等待者，不重复唤醒。
+
+### 单测锁住的不变式
+
+`tests/Service.Tests/FileTransferTests.cs` 追加
+`E2E_PeerCancel_SenderReturnsWithinOneSecond`，与现有
+`E2E_Cancel_SenderStopsAndReceiverDropsPart`（本地 cancel）配对成
+"本地 cancel / peer cancel 两条对称路径"——任一回归都会被两侧之一捕获。
+
+测试要点：
+- 32MB 源文件让传输"进行中"状态可被采样到（5MB 在回环上一两拍就传完，
+  复现路径会失效）。
+- 等 `a.Snapshot()` 出现 `Direction == Sending && State == "sending"` 的
+  传输再喂对端帧。
+- 通过 `a.OnFrame(EncodeStatus(id, Cancelled, "peer cancel"))` 走真实
+  接收路径 → `HandleStatusFrame` → 修复后的两个 Pulse。
+- `await upload.WaitAsync(1s)`：阈值 1s 远小于 `PeerTimeout = 60s`，
+  修复前必失败（60s 内 WaitAsync 直接抛 TimeoutException）。给 1s 阈值
+  留 CI 抖动空间，但仍是修复前必失败的明确信号。
+
+`dotnet test DeskLink.sln` 当前 **729/729 全过**（= 之前 728 + 本次
+E2E_PeerCancel）。分布：Protocol 71 / Service 210 / Client 141 /
+DirectHandshake 41 / Agent 137 / Panel 129。
+
+---
+
 ## 5. 协议与实现层面的已知取舍
 
 | 项 | 说明 |
@@ -500,16 +628,17 @@ Service 的两类管道（RPC 与媒体）都以 SYSTEM/Administrators/创建者
 
 ---
 
-## 6. 测试覆盖现状（2026-09-29 更新）
+## 6. 测试覆盖现状（2026-10-08 更新）
 
 ```
-dotnet build DeskLink.sln                     → 0 错误 / 103 警告(CA1416 平台兼容 + 1 xUnit1031)
-dotnet test  DeskLink.sln                     → 全部通过（545）
+dotnet build DeskLink.sln                     → 0 错误 / 平台兼容性警告若干（CA1416，不影响正确性）
+dotnet test  DeskLink.sln                     → 全部通过（737）
   Protocol.Tests        71
-  Service.Tests        176
-  Client.Tests         120
+  Service.Tests        210
+  Client.Tests         141
   DirectHandshake.Tests 41
-  Agent.Tests          137
+  Agent.Tests          145
+  Panel.Tests          129
 go build / go vet / gofmt -l                  → 干净
 go test ./... -count=1                        → 全部 ok
 pwsh tests/e2e-smoke.ps1 -Mode all -Transport both → EXIT=0
