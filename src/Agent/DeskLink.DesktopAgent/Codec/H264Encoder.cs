@@ -14,6 +14,18 @@ public sealed record H264EncoderSettings(
     bool PreferHardware,
     int KeyFrameInterval)
 {
+    /// <summary>
+    /// 软件 MFT 兜底下的分辨率硬上限（短边 720，长边按比例但不超过 1280）。
+    ///
+    /// 为什么需要：1080p 软件 H.264 在中端 CPU 上常常吃不满 30fps（前置缓冲带来的延迟
+    /// 加上编码本身），强行让它"撑住"只会让远端画面一卡一卡。直接缩到 720p 短边，
+    /// 带宽与码率都压到合理范围，画面更顺、输入也更跟手——这与 DESIGN「先降码率帧率，
+    /// 后降分辨率」并不冲突：自适应降级是**链路**侧的妥协，而这里是**编码器**侧
+    /// 的硬上限（v1 软件同步 MFT 的实际能力上限）。硬件 MFT 不受限。
+    /// </summary>
+    public const int SoftwareMaxShortEdge = 720;
+    public const int SoftwareMaxLongEdge = 1280;
+
     /// <summary>按分辨率与帧率给一个保守的默认码率（桌面内容比自然图像好压）。</summary>
     public static H264EncoderSettings Default(int width, int height, bool preferHardware = true)
     {
@@ -23,6 +35,41 @@ public sealed record H264EncoderSettings(
         int bitrate = (int)Math.Clamp(pixels * fps * 9 / 100, 800_000, 20_000_000);
         return new H264EncoderSettings(width, height, fps, bitrate, preferHardware, KeyFrameInterval: 60);
     }
+
+    /// <summary>
+    /// 把请求的尺寸按软件 MFT 上限等比缩放（保持长宽比、最长边不超 1280、短边不超 720）。
+    /// 已经更小的输入不会被放大。
+    /// </summary>
+    /// <remarks>
+    /// 缩放后宽度/高度必须为偶数（NV12 要求）。软件 MFT 一律是奇数边缘的常见来源是
+    /// 1280x720 这种"刚到上限"的组合本身已经是偶数；但"原始 1920x1080 缩到 720p"
+    /// 按 0.6666 算出来 1280x720 整好是偶数。为防止极端输入下出现奇数边，结尾夹紧到偶数。
+    /// </remarks>
+    public static (int Width, int Height) ClampForSoftwareEncoder(int width, int height)
+    {
+        if (width <= 0 || height <= 0) return (width, height);
+        int longEdge = Math.Max(width, height);
+        int shortEdge = Math.Min(width, height);
+
+        if (shortEdge <= SoftwareMaxShortEdge && longEdge <= SoftwareMaxLongEdge)
+        {
+            return (MakeEven(width), MakeEven(height));
+        }
+
+        // 以短边 = 720 为基准做等比缩放，长边自动按比例（必定 <= 2 * 720 = 1440，再夹到 1280）。
+        double scale = (double)SoftwareMaxShortEdge / shortEdge;
+        int newW = (int)Math.Round(width * scale);
+        int newH = (int)Math.Round(height * scale);
+        if (Math.Max(newW, newH) > SoftwareMaxLongEdge)
+        {
+            double longScale = (double)SoftwareMaxLongEdge / Math.Max(newW, newH);
+            newW = (int)Math.Round(newW * longScale);
+            newH = (int)Math.Round(newH * longScale);
+        }
+        return (MakeEven(Math.Max(2, newW)), MakeEven(Math.Max(2, newH)));
+    }
+
+    private static int MakeEven(int v) => v % 2 == 0 ? v : Math.Max(2, v - 1);
 }
 
 /// <summary>
@@ -160,10 +207,16 @@ public sealed class H264Encoder : IDisposable
             {
                 transform = activate.ActivateObject<IMFTransform>();
 
-                if (!TrySetTypes(transform, settings)) continue;
+                // 软件 MFT 兜底下硬限 720p：先按"这个候选是软件"重新计算尺寸再去 SetTypes。
+                // 不能在 TryCreate 顶层统一 clamp，那样硬件候选也会被卡到 720p。
+                var effectiveSettings = isHardware
+                    ? settings
+                    : ClampSettingsForSoftware(settings);
+
+                if (!TrySetTypes(transform, effectiveSettings)) continue;
 
                 codecApi = CodecApi.TryCreate(transform.NativePointer);
-                ConfigureCodecApi(codecApi, settings);
+                ConfigureCodecApi(codecApi, effectiveSettings);
 
                 // 首帧强制关键帧，保证 SPS/PPS 在会话最开始就发出。
                 codecApi?.TrySetUInt32(CodecApiGuids.AVEncVideoForceKeyFrame, 1);
@@ -180,8 +233,9 @@ public sealed class H264Encoder : IDisposable
 
                 return new H264Encoder(
                     transform, codecApi, allActivates, isHardware, backend,
-                    settings.Width, settings.Height, settings.Fps, settings.KeyFrameInterval,
-                    settings.BitrateBps, settings.PreferHardware)
+                    effectiveSettings.Width, effectiveSettings.Height,
+                    effectiveSettings.Fps, effectiveSettings.KeyFrameInterval,
+                    effectiveSettings.BitrateBps, effectiveSettings.PreferHardware)
                 {
                     _started = true,
                 };
@@ -196,6 +250,17 @@ public sealed class H264Encoder : IDisposable
 
         error = "no usable H.264 encoder MFT found";
         return null;
+    }
+
+    /// <summary>
+    /// 把 settings 按软件 MFT 720p 上限重新计算。
+    /// 走 `with` 表达式保留其它字段，只覆盖尺寸（码率/帧率不变，避免"先降码率"也跑进来）。
+    /// </summary>
+    private static H264EncoderSettings ClampSettingsForSoftware(H264EncoderSettings settings)
+    {
+        var (w, h) = H264EncoderSettings.ClampForSoftwareEncoder(settings.Width, settings.Height);
+        if (w == settings.Width && h == settings.Height) return settings;
+        return settings with { Width = w, Height = h };
     }
 
     private static bool TrySetTypes(IMFTransform transform, H264EncoderSettings settings)
