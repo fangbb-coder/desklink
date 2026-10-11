@@ -1,17 +1,33 @@
-# registryd systemd 单元（由 deploy.sh 用 sed 替换 @...@ 占位符后安装）。
+# desklink-registryd.service — VPS 端注册中心（设备/配对/撤销状态，仅 loopback）
+#
+# 由 deploy.sh 用 sed 替换 @...@ 占位符后安装到 /etc/systemd/system/。
+# 启动：systemctl enable --now desklink-registryd
+# 状态：systemctl status desklink-registryd
+# 日志：journalctl -u desklink-registryd -f
 #
 # 安全要点：registry 保存设备公钥 / 加密昵称 / 配对关系 / 撤销状态，
 # **绝不暴露公网** —— 只监听 127.0.0.1，由 relayd 经 loopback HTTP 代理访问。
+
 [Unit]
 Description=DeskLink registryd（设备/配对/撤销状态，仅 loopback）
 Documentation=https://github.com/desklink
-After=network.target
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
 
 [Service]
 Type=simple
 User=desklink
 Group=desklink
 WorkingDirectory=@DATA_DIR@
+
+# 优雅关闭：SIGTERM 后等待 15s 让 SQLite WAL flush + unix socket 关闭
+ExecStop=/bin/kill -TERM $MAINPID
+TimeoutStopSec=15
+KillMode=mixed
+FinalKillSignal=SIGKILL
+
 ExecStart=@INSTALL_DIR@/registryd \
     --data-dir @DATA_DIR@/registryd \
     --listen 127.0.0.1:@REG_PORT@ \
@@ -22,16 +38,39 @@ ExecStart=@INSTALL_DIR@/registryd \
 Restart=on-failure
 RestartSec=3
 
-# 收紧权限：只需要写自己的数据目录与 unix socket。
+# 资源限制
+LimitNOFILE=65536
+MemoryMax=256M
+TasksMax=1024
+
+# 安全强化（systemd ≥ 240）
 NoNewPrivileges=true
 PrivateTmp=true
+PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=@DATA_DIR@
 ProtectKernelTunables=true
+ProtectKernelModules=true
 ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
 RestrictSUIDSGID=true
 LockPersonality=true
+# 写路径仅数据目录（SQLite DB + unix socket）
+ReadWritePaths=@DATA_DIR@
+# registry 只需要 AF_UNIX（socket）+ AF_INET（loopback HTTP）
+RestrictAddressFamilies=AF_UNIX AF_INET
+# 系统调用白名单
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# 拒内存页可写+可执行
+MemoryDenyWriteExecute=yes
+
+# 日志走 journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=desklink-registryd
 
 [Install]
 WantedBy=multi-user.target
