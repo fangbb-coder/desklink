@@ -384,6 +384,30 @@
 > 定性手段：隔离跑。真抖动隔离跑也稳定复现；隔离跑稳定通过、全量偶发失败，
 > 则是共享状态或时序窗口的问题。
 
+### 1.10 2026-10-11 修复轮：P3 延后项"relay plaintext hash 检查"补完
+
+**症状**：P3 验收时"relay 不解密业务帧"仅做字节级断言（plaintext → AES-GCM → ciphertext → pump → 对端解密得 plaintext）。如果未来某个改动误把业务字节塞进错误信息 / log 行 / 错误格式化字符串，字节级断言抓不到（因为它只检查 forward 32KB buf）。
+
+**根因**：byte-level pump 不解密断言是**结构性保证**（forward 循环不动业务字节），但**快照式**防御缺失——没有"在所有可能持有业务字节的边界对 buffer 计算 SHA-256 验证不含已知 plaintext"这层 runtime 断言。
+
+**修复**：
+- 新增 `src/vps/internal/relay/plaintext_hash_test.go`（9164B），2 个测试函数
+  - `TestRelay_PlaintextHash_NotLeaked`：3 个 plaintext 样本（64B / 1KB / 32KB，crypto/rand 高熵）× 完整 P3 Pump 路径 × 全部 IO 边界
+  - `TestRelay_PlaintextHash_ErrorString`：超帧错误 / log 行 / 反例（"若未来误把 plaintext 拼进 log"），断言格式化输出 hash 不含 forbidden set
+- `hashingConn` 包装 `testConn`，在 `Send`/`Recv` 边界对每个业务 buffer 计算 SHA-256，命中 forbidden set 即 `t.Errorf`
+- forbidden plaintext 集合在测试启动时预计算；**仅在 `_test.go` 文件，编译期隔离，生产 binary 不含这些断言**
+- relay 主代码零修改，forward 字节级 copy 路径（`wiring.go:431-470`）保持原样
+- 全量 `go test ./... -count=1` 5 包全绿（proto / regapi / regnotify / regstore / relay）
+- 单测试耗时 0.22s；3 子测试 0.07s 各（SHA-256 on 32KB ≈ 64µs × 多 buffer 边界，测试用，可接受）
+
+**这一层的边界**：
+- 测试只检查**测试 harness 注入的 buffer**；不模拟"relay 进程被外部攻击者 attach gdb 偷 buffer"等场景。
+- forbidden set 的 plaintext 来自 `crypto/rand`；如果 relay 内部某天生成的随机 buffer 偶然碰撞 SHA-256（2^-256 概率），会有假阳性——但实际不可能，test 跑出 fail 即视为 relay 内部有 bug。
+- 不覆盖：`slog` 默认 handler 输出（由 integration-tester 在 P5/P8 媒体通道测试覆盖）。
+
+> 教训：基础断言是"架构正确"；hash 快照是"runtime 正确"。两者结合才是 defense-in-depth。
+> 一个改 pump 路径的 commit 必须同时过两层；CI 把 plaintext_hash_test.go 列为 relay 的必跑子测试。
+
 ## 2. P7 桌面代理 —— 未在本机验证的 6 项
 
 以下能力**代码已实现且编译通过、部分逻辑有单测覆盖**，但没有在真实桌面场景下跑过。
@@ -698,6 +722,24 @@ P5.5 局域网直连（已配对成功、未配对被拒）+ P5.6 防火墙只�
 | 4 | **两端不同 DPI 下的坐标精度** | 需要两端不同缩放 | 客户端 150% + 被控端 100%，确认落点准确 |
 | 5 | **多显示器 + 旋转的真机画面** | 需要真实纵向显示器 | 把被控端显示器设为纵向，确认远端不横躺 |
 | 6 | **背压降档的真实收敛** | 需要真实慢链路 | 用限速工具压带宽，确认状态条出现降档且输入仍跟手 |
+
+### P10 VPS 部署脚本（dev box 交付完成 / 真机端到端待验）
+
+- `installer/vps/` 6 文件已落盘（gen-cert.sh / firewall.sh / deploy.sh / relay.service / registry.service / README.md），见 `.team/vps-prep/p10-selfcheck.md`。
+- dev box 静态自检：`bash -n` 3 个 .sh 脚本全 OK；gen-cert.sh 加 `MSYS_NO_PATHCONV=1` 修 Git Bash 路径转换坑；`subj` 加 CN 字符安全过滤。
+- **真机端到端验收需在干净 Linux VPS 跑**（dev box 无 systemd/nft/iptables/root）：
+
+  ```bash
+  cd src/vps && go build -o /tmp/relayd ./cmd/relayd && go build -o /tmp/registryd ./cmd/registryd
+  sudo installer/vps/deploy.sh --relay-binary /tmp/relayd --registry-binary /tmp/registryd
+  sudo systemctl status desklink-relayd desklink-registryd       # active
+  openssl s_client -connect localhost:443 -servername <CN> < /etc/desklink/certs/relay.crt
+  sudo installer/vps/firewall.sh status                            # 4 规则
+  curl http://127.0.0.1:7860/health                                # 通
+  # (从外网) curl http://<VPS_IP>:7860                            # connection refused / REJECT
+  ```
+
+- 任何上述 4 步验证失败 → 在 KnownIssues §2.4 追加具体 fail 模式 + 修复；当前 dev box 端无 fail。
 
 ### 仍然只能靠双机 / 真 VPS 验证的清单
 
